@@ -1,0 +1,162 @@
+import { KEY_NAMES } from "./util";
+
+// ------- tiny radix-2 FFT (in-place, real input) -------
+function fft(re: Float32Array, im: Float32Array) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const ur = re[i + j], ui = im[i + j];
+        const vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci;
+        const vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+        re[i + j] = ur + vr; im[i + j] = ui + vi;
+        re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+
+function mono(buf: AudioBuffer): Float32Array {
+  const n = buf.length;
+  const out = new Float32Array(n);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < n; i++) out[i] += d[i] / buf.numberOfChannels;
+  }
+  return out;
+}
+
+// ------- loudness (RMS-based, approximating LUFS with K-ish weighting omitted) -------
+export function analyzeLoudness(buf: AudioBuffer): { gain: number; peak: number; energy: number } {
+  const m = mono(buf);
+  let sum = 0, peak = 0;
+  const step = Math.max(1, Math.floor(m.length / 2_000_000));
+  let count = 0;
+  for (let i = 0; i < m.length; i += step) {
+    const v = m[i];
+    sum += v * v; count++;
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+  }
+  const rms = Math.sqrt(sum / Math.max(1, count));
+  const dbfs = 20 * Math.log10(rms || 1e-9);
+  // ReplayGain reference is ~ -18 dBFS RMS (89 dB SPL). gain = ref - measured
+  const gain = Math.max(-24, Math.min(24, -18 - dbfs));
+  const energy = Math.max(0, Math.min(1, (dbfs + 40) / 34));
+  return { gain: +gain.toFixed(2), peak: +peak.toFixed(4), energy };
+}
+
+// ------- waveform peaks for the seek bar -------
+export function waveformPeaks(buf: AudioBuffer, bins = 240): number[] {
+  const m = mono(buf);
+  const per = Math.floor(m.length / bins);
+  const out: number[] = [];
+  let max = 0;
+  for (let b = 0; b < bins; b++) {
+    let p = 0;
+    const start = b * per;
+    const stride = Math.max(1, Math.floor(per / 400));
+    for (let i = start; i < start + per; i += stride) { const a = Math.abs(m[i]); if (a > p) p = a; }
+    out.push(p); if (p > max) max = p;
+  }
+  return out.map((v) => (max ? v / max : 0));
+}
+
+// ------- silence detection at edges -------
+export function detectSilence(buf: AudioBuffer, thresholdDb: number): { start: number; end: number } {
+  const m = mono(buf);
+  const thr = Math.pow(10, thresholdDb / 20);
+  let s = 0, e = m.length - 1;
+  while (s < m.length && Math.abs(m[s]) < thr) s++;
+  while (e > s && Math.abs(m[e]) < thr) e--;
+  return { start: s / buf.sampleRate, end: (e + 1) / buf.sampleRate };
+}
+
+// ------- Key detection: Krumhansl–Schmuckler on chroma -------
+const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+function corr(a: number[], b: number[]) {
+  const ma = a.reduce((x, y) => x + y, 0) / 12, mb = b.reduce((x, y) => x + y, 0) / 12;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < 12; i++) { num += (a[i] - ma) * (b[i] - mb); da += (a[i] - ma) ** 2; db += (b[i] - mb) ** 2; }
+  return num / Math.sqrt(da * db || 1);
+}
+export function detectKey(buf: AudioBuffer): { key: string; confidence: number } {
+  const m = mono(buf);
+  const sr = buf.sampleRate;
+  const N = 4096;
+  const frames = 48;
+  const chroma = new Array(12).fill(0);
+  const re = new Float32Array(N), im = new Float32Array(N);
+  const hop = Math.max(N, Math.floor((m.length - N) / frames));
+  for (let f = 0; f < frames; f++) {
+    const off = f * hop;
+    if (off + N > m.length) break;
+    for (let i = 0; i < N; i++) { re[i] = m[off + i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N)); im[i] = 0; }
+    fft(re, im);
+    for (let k = 2; k < N / 2; k++) {
+      const freq = (k * sr) / N;
+      if (freq < 60 || freq > 4000) continue;
+      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+      const midi = 69 + 12 * Math.log2(freq / 440);
+      const pc = ((Math.round(midi) % 12) + 12) % 12;
+      chroma[pc] += mag * mag;
+    }
+  }
+  let best = { key: "", score: -2 }, second = -2;
+  for (let r = 0; r < 12; r++) {
+    const rot = (p: number[]) => chroma.map((_, i) => p[(i - r + 12) % 12]);
+    const cM = corr(chroma, rot(MAJOR_PROFILE));
+    const cm = corr(chroma, rot(MINOR_PROFILE));
+    for (const [c, name] of [[cM, `${KEY_NAMES[r]} major`], [cm, `${KEY_NAMES[r]} minor`]] as [number, string][]) {
+      if (c > best.score) { second = best.score; best = { key: name, score: c }; }
+      else if (c > second) second = c;
+    }
+  }
+  return { key: best.key, confidence: Math.max(0, Math.min(1, (best.score - second) * 4 + 0.3)) };
+}
+
+// ------- BPM: energy-flux onset + autocorrelation over 60–180 -------
+export function detectBpm(buf: AudioBuffer): number | null {
+  const m = mono(buf);
+  const sr = buf.sampleRate;
+  const hop = 512;
+  const nFrames = Math.floor(m.length / hop);
+  if (nFrames < 200) return null;
+  const env = new Float32Array(nFrames);
+  for (let f = 0; f < nFrames; f++) {
+    let s = 0;
+    const o = f * hop;
+    for (let i = 0; i < hop; i += 4) s += m[o + i] * m[o + i];
+    env[f] = Math.sqrt(s / (hop / 4));
+  }
+  const flux = new Float32Array(nFrames);
+  for (let i = 1; i < nFrames; i++) flux[i] = Math.max(0, env[i] - env[i - 1]);
+  const fps = sr / hop;
+  const minLag = Math.floor((60 / 200) * fps), maxLag = Math.ceil((60 / 60) * fps);
+  let bestLag = 0, bestVal = -1;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let s = 0;
+    for (let i = lag; i < nFrames; i++) s += flux[i] * flux[i - lag];
+    // slight preference to 90-150 range
+    const bpm = (60 * fps) / lag;
+    const w = bpm >= 85 && bpm <= 155 ? 1.1 : 1;
+    if (s * w > bestVal) { bestVal = s * w; bestLag = lag; }
+  }
+  if (!bestLag) return null;
+  let bpm = (60 * fps) / bestLag;
+  while (bpm < 70) bpm *= 2;
+  while (bpm > 180) bpm /= 2;
+  return Math.round(bpm);
+}

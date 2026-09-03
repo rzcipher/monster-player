@@ -1,0 +1,362 @@
+// SaltBee — native Windows/macOS/Linux shell.
+//
+//  * frameless, acrylic-ish window with custom title bar
+//  * AIMP-style dock: the window becomes a strip across the top of the display,
+//    always-on-top, and AUTO-HIDES to a 3px sliver. Move the mouse to the top
+//    edge of the screen and it slides back down ("call it down on hover").
+//  * native folder scanning (no browser File System Access API needed)
+//  * global media hotkeys, tray icon, single-instance, window-state memory
+//  * local CLI bridge for the tagging/Demucs helpers
+const { app, BrowserWindow, ipcMain, screen, shell, dialog, globalShortcut, Tray, Menu, nativeImage, powerSaveBlocker } = require("electron");
+const path = require("path");
+const fs = require("fs");
+const fsp = require("fs/promises");
+const http = require("http");
+const { spawn } = require("child_process");
+
+const DOCK_HEIGHT = 58;
+const DOCK_EXPANDED_HEIGHT = 720;
+const PEEK = 3;              // pixels of window left on screen when auto-hidden
+const HOVER_ZONE = 4;        // how close to the top edge the cursor must get
+const REVEAL_MS = 90;        // animation step interval
+const HIDE_DELAY = 700;      // grace period before hiding again
+
+const isWin = process.platform === "win32";
+const stateFile = () => path.join(app.getPath("userData"), "window-state.json");
+
+let win = null;
+let tray = null;
+let normalBounds = null;
+let dock = { on: false, expanded: false, autoHide: true, revealed: true };
+let hoverTimer = null;
+let hideTimer = null;
+let animTimer = null;
+let psb = null;
+
+// ---------------------------------------------------------------- audio flags
+// Give the Web Audio graph the cleanest path Chromium offers; the native
+// WASAPI-exclusive / ASIO hook lives in an optional addon (see README).
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+app.commandLine.appendSwitch("disable-features", "AudioServiceOutOfProcess,HardwareMediaKeyHandling");
+app.commandLine.appendSwitch("enable-features", "WebAudioSinkSelection,SharedArrayBuffer");
+app.commandLine.appendSwitch("force_high_performance_gpu");
+
+// -------------------------------------------------------------- window state
+function readState() {
+  try { return JSON.parse(fs.readFileSync(stateFile(), "utf8")); } catch { return null; }
+}
+function saveState() {
+  if (!win || win.isDestroyed() || dock.on) return;
+  try {
+    fs.mkdirSync(path.dirname(stateFile()), { recursive: true });
+    fs.writeFileSync(stateFile(), JSON.stringify({ ...win.getBounds(), maximized: win.isMaximized() }));
+  } catch { /* ignore */ }
+}
+
+function createWindow() {
+  const st = readState();
+  win = new BrowserWindow({
+    width: st?.width || 1500,
+    height: st?.height || 900,
+    x: st?.x, y: st?.y,
+    minWidth: 940, minHeight: DOCK_HEIGHT,
+    frame: false,
+    backgroundColor: "#0d0b14",
+    titleBarStyle: "hidden",
+    show: false,
+    icon: path.join(__dirname, "..", "build", "icon.png"),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+      sandbox: false,
+      webSecurity: true,
+    },
+  });
+  if (st?.maximized) win.maximize();
+
+  const devUrl = process.env.SALTBEE_DEV_URL;
+  if (devUrl) win.loadURL(devUrl);
+  else win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+
+  win.once("ready-to-show", () => win.show());
+  win.on("maximize", () => win.webContents.send("win:state", { maximized: true }));
+  win.on("unmaximize", () => win.webContents.send("win:state", { maximized: false }));
+  win.on("resize", saveState);
+  win.on("move", saveState);
+  win.on("close", saveState);
+  win.on("closed", () => (win = null));
+  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: "deny" }; });
+
+  // keep the audio clock accurate while the app is minimised / screen sleeps
+  if (!psb) psb = powerSaveBlocker.start("prevent-app-suspension");
+}
+
+// ------------------------------------------------------------------ docking
+function displayForCursor() {
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+}
+
+function dockHeight() {
+  return dock.expanded ? DOCK_EXPANDED_HEIGHT : DOCK_HEIGHT;
+}
+
+function applyDockBounds(y) {
+  const d = displayForCursor();
+  win.setBounds({ x: d.x, y, width: d.width, height: dockHeight() }, false);
+}
+
+/** Slide the docked strip to `targetY` with a short ease-out animation. */
+function slideTo(targetY, done) {
+  if (animTimer) { clearInterval(animTimer); animTimer = null; }
+  const step = () => {
+    if (!win || win.isDestroyed()) return stop();
+    const y = win.getBounds().y;
+    const delta = targetY - y;
+    if (Math.abs(delta) <= 2) { applyDockBounds(targetY); return stop(); }
+    applyDockBounds(Math.round(y + delta * 0.34));
+  };
+  const stop = () => { clearInterval(animTimer); animTimer = null; done?.(); };
+  animTimer = setInterval(step, REVEAL_MS / 6);
+}
+
+function reveal() {
+  if (!dock.on || dock.revealed) return;
+  dock.revealed = true;
+  const d = displayForCursor();
+  slideTo(d.y);
+  win.webContents.send("dock:revealed", true);
+}
+
+function conceal() {
+  if (!dock.on || !dock.revealed || !dock.autoHide || dock.expanded) return;
+  dock.revealed = false;
+  const d = displayForCursor();
+  slideTo(d.y - dockHeight() + PEEK);
+  win.webContents.send("dock:revealed", false);
+}
+
+/** Poll the cursor: near the top edge → call the player down; away → hide. */
+function startHoverWatch() {
+  if (hoverTimer) return;
+  hoverTimer = setInterval(() => {
+    if (!win || win.isDestroyed() || !dock.on || !dock.autoHide) return;
+    const p = screen.getCursorScreenPoint();
+    const d = screen.getDisplayNearestPoint(p).workArea;
+    const nearTop = p.y <= d.y + HOVER_ZONE;
+    const b = win.getBounds();
+    const insideStrip = p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
+
+    if (nearTop && !dock.revealed) {
+      clearTimeout(hideTimer);
+      reveal();
+    } else if (dock.revealed && !insideStrip && !nearTop) {
+      if (!hideTimer) hideTimer = setTimeout(() => { hideTimer = null; conceal(); }, HIDE_DELAY);
+    } else if (insideStrip || nearTop) {
+      clearTimeout(hideTimer); hideTimer = null;
+    }
+  }, 120);
+}
+function stopHoverWatch() {
+  clearInterval(hoverTimer); hoverTimer = null;
+  clearTimeout(hideTimer); hideTimer = null;
+  if (animTimer) { clearInterval(animTimer); animTimer = null; }
+}
+
+function setDocked(on) {
+  if (!win) return;
+  dock.on = !!on;
+  if (dock.on) {
+    if (!win.isMaximized()) normalBounds = win.getBounds();
+    win.unmaximize();
+    win.setResizable(false);
+    win.setAlwaysOnTop(true, "screen-saver");
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    dock.revealed = true;
+    applyDockBounds(displayForCursor().y);
+    startHoverWatch();
+  } else {
+    stopHoverWatch();
+    dock.expanded = false;
+    win.setAlwaysOnTop(false);
+    win.setVisibleOnAllWorkspaces(false);
+    win.setResizable(true);
+    if (normalBounds) win.setBounds(normalBounds);
+  }
+  win.webContents.send("dock:state", dock);
+}
+
+ipcMain.on("win:minimize", () => win?.minimize());
+ipcMain.on("win:maximize", () => (win?.isMaximized() ? win.unmaximize() : win?.maximize()));
+ipcMain.on("win:close", () => win?.close());
+ipcMain.on("win:dock", (_e, on) => setDocked(on));
+ipcMain.on("win:dockAutoHide", (_e, on) => {
+  dock.autoHide = !!on;
+  if (dock.on) { if (dock.autoHide) startHoverWatch(); else { stopHoverWatch(); reveal(); } }
+  win?.webContents.send("dock:state", dock);
+});
+ipcMain.on("win:dockExpand", (_e, expanded) => {
+  if (!win) return;
+  dock.expanded = !!expanded;
+  if (dock.on) applyDockBounds(displayForCursor().y);
+  win.webContents.send("dock:state", dock);
+});
+ipcMain.on("win:pin", (_e, on) => win?.setAlwaysOnTop(!!on, "screen-saver"));
+ipcMain.on("win:opacity", (_e, v) => win?.setOpacity(Math.max(0.25, Math.min(1, Number(v) || 1))));
+ipcMain.handle("win:isMaximized", () => !!win?.isMaximized());
+
+// --------------------------------------------------------- native filesystem
+const AUDIO_EXT = new Set([".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aif", ".aiff", ".aifc", ".wma", ".ape", ".wv", ".mpc", ".tta", ".dsf", ".dff", ".cue"]);
+
+ipcMain.handle("fs:pickFolder", async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ["openDirectory"], title: "Choose your music folder" });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle("fs:pickFiles", async () => {
+  const r = await dialog.showOpenDialog(win, {
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "Audio", extensions: [...AUDIO_EXT].map((e) => e.slice(1)) }],
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+
+/** Recursively list audio files under `root` (native, fast, no permission prompts). */
+ipcMain.handle("fs:scan", async (e, root) => {
+  const out = [];
+  let seen = 0;
+  async function walk(dir, depth) {
+    if (depth > 12) return;
+    let entries = [];
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) { if (ent.name.startsWith(".")) continue; await walk(full, depth + 1); }
+      else if (AUDIO_EXT.has(path.extname(ent.name).toLowerCase())) {
+        let size = 0, mtime = Date.now();
+        try { const st = await fsp.stat(full); size = st.size; mtime = st.mtimeMs; } catch { /* ignore */ }
+        out.push({ path: full, name: ent.name, folder: dir, size, mtime });
+        if (++seen % 40 === 0) e.sender.send("fs:scanProgress", { done: seen, current: full });
+      }
+    }
+  }
+  await walk(root, 0);
+  return out;
+});
+
+ipcMain.handle("fs:read", async (_e, file) => {
+  const buf = await fsp.readFile(file);
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+});
+ipcMain.handle("fs:readText", async (_e, file) => { try { return await fsp.readFile(file, "utf8"); } catch { return null; } });
+ipcMain.handle("fs:writeText", async (_e, file, text) => { await fsp.writeFile(file, text, "utf8"); return true; });
+ipcMain.handle("fs:stat", async (_e, file) => { try { const s = await fsp.stat(file); return { size: s.size, mtime: s.mtimeMs }; } catch { return null; } });
+ipcMain.on("shell:reveal", (_e, file) => shell.showItemInFolder(file));
+ipcMain.on("shell:open", (_e, url) => shell.openExternal(url));
+
+// ------------------------------------------------------------------- CLI bridge
+function runCli(payload) {
+  return new Promise((resolve) => {
+    const { action, path: file, isrc, mbid } = payload;
+    const cli = process.env.SALTBEE_CLI || "musiccli";
+    const args = {
+      "fix-metadata": ["fix", file, ...(mbid ? ["--mbid", mbid] : isrc ? ["--isrc", isrc] : [])],
+      retranslate: ["translate", file, "--force"],
+      "demucs-acapella": ["demucs", file, "--stem", "vocals", "--sidecar"],
+      retag: ["retag", file],
+    }[action];
+    if (!args) return resolve({ code: 400, out: "unknown action" });
+    const child = spawn(cli, args, { shell: true });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    child.on("error", (err) => resolve({ code: 500, out: String(err) }));
+    child.on("close", (code) => resolve({ code: code === 0 ? 200 : 500, out }));
+  });
+}
+ipcMain.handle("cli:run", (_e, payload) => runCli(payload));
+
+function startCliBridge() {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
+    if (req.method !== "POST" || req.url !== "/action") { res.writeHead(404); return res.end(); }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      try {
+        const r = await runCli(JSON.parse(body));
+        res.writeHead(r.code === 200 ? 200 : r.code, { "Content-Type": "text/plain" });
+        res.end(r.out);
+      } catch (err) { res.writeHead(400); res.end(String(err)); }
+    });
+  });
+  server.on("error", () => { /* port busy — the IPC path still works */ });
+  server.listen(7788, "127.0.0.1");
+}
+
+// ------------------------------------------------------------- tray + hotkeys
+function trayIcon() {
+  const p = path.join(__dirname, "..", "build", "icon.png");
+  if (fs.existsSync(p)) return nativeImage.createFromPath(p).resize({ width: 16, height: 16 });
+  return nativeImage.createEmpty();
+}
+function buildTray() {
+  try {
+    tray = new Tray(trayIcon());
+    const send = (ch) => () => win?.webContents.send(ch);
+    tray.setToolTip("SaltBee");
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: "Show / hide", click: () => (win?.isVisible() ? win.hide() : (win?.show(), win?.focus())) },
+      { label: "Play / pause", click: send("media:playpause") },
+      { label: "Next", click: send("media:next") },
+      { label: "Previous", click: send("media:prev") },
+      { type: "separator" },
+      { label: "Dock to top of screen", type: "checkbox", checked: dock.on, click: (i) => setDocked(i.checked) },
+      { type: "separator" },
+      { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
+    ]));
+    tray.on("click", () => (win?.isVisible() ? win.focus() : win?.show()));
+  } catch { /* no tray on this platform */ }
+}
+
+function registerHotkeys() {
+  const map = {
+    MediaPlayPause: "media:playpause",
+    MediaNextTrack: "media:next",
+    MediaPreviousTrack: "media:prev",
+    MediaStop: "media:stop",
+    "CommandOrControl+Alt+D": "media:dock",
+    "CommandOrControl+Alt+L": "media:lyrics",
+  };
+  for (const [accel, ch] of Object.entries(map)) {
+    try { globalShortcut.register(accel, () => { if (ch === "media:dock") setDocked(!dock.on); else win?.webContents.send(ch); }); } catch { /* taken */ }
+  }
+}
+
+// ------------------------------------------------------------------ lifecycle
+if (!app.requestSingleInstanceLock()) app.quit();
+else {
+  app.on("second-instance", (_e, argv) => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+    const files = argv.slice(1).filter((a) => AUDIO_EXT.has(path.extname(a).toLowerCase()));
+    if (files.length) win.webContents.send("open:files", files);
+  });
+
+  app.whenReady().then(() => {
+    if (isWin) app.setAppUserModelId("com.saltbee.player");
+    createWindow();
+    startCliBridge();
+    buildTray();
+    registerHotkeys();
+    const files = process.argv.slice(1).filter((a) => AUDIO_EXT.has(path.extname(a).toLowerCase()));
+    if (files.length) win.webContents.once("did-finish-load", () => win.webContents.send("open:files", files));
+    app.on("activate", () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
+  });
+
+  app.on("will-quit", () => { globalShortcut.unregisterAll(); stopHoverWatch(); });
+  app.on("window-all-closed", () => app.quit());
+}
