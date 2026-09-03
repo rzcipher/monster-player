@@ -32,6 +32,7 @@ let hoverTimer = null;
 let hideTimer = null;
 let animTimer = null;
 let psb = null;
+let lyricsWin = null;
 
 // ---------------------------------------------------------------- audio flags
 // Give the Web Audio graph the cleanest path Chromium offers; the native
@@ -296,6 +297,45 @@ function startCliBridge() {
   server.listen(7788, "127.0.0.1");
 }
 
+// ------------------------------------------------- Salt Player desktop lyrics
+// A frameless, click-through-ish always-on-top strip that floats over every
+// other window and shows the current line. Drag it anywhere; it remembers where.
+function createLyricsWindow() {
+  if (lyricsWin && !lyricsWin.isDestroyed()) { lyricsWin.show(); return; }
+  const d = screen.getPrimaryDisplay().workArea;
+  const W = Math.min(1000, Math.round(d.width * 0.62));
+  const H = 150;
+  lyricsWin = new BrowserWindow({
+    width: W, height: H,
+    x: d.x + Math.round((d.width - W) / 2),
+    y: d.y + d.height - H - 70,
+    frame: false, transparent: true, resizable: true, movable: true,
+    skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: true,
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
+  });
+  lyricsWin.setAlwaysOnTop(true, "screen-saver");
+  lyricsWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  lyricsWin.loadFile(path.join(__dirname, "lyrics.html"));
+  lyricsWin.on("closed", () => { lyricsWin = null; win?.webContents.send("lyrics:closed"); });
+}
+
+ipcMain.on("lyrics:toggle", (_e, on) => {
+  if (on) createLyricsWindow();
+  else if (lyricsWin && !lyricsWin.isDestroyed()) lyricsWin.close();
+});
+// the renderer pushes {line, next, title, artist, accent, progress}; we relay it
+ipcMain.on("lyrics:update", (_e, payload) => {
+  if (lyricsWin && !lyricsWin.isDestroyed()) lyricsWin.webContents.send("lyrics:data", payload);
+});
+ipcMain.on("lyrics:lock", (_e, locked) => {
+  if (!lyricsWin || lyricsWin.isDestroyed()) return;
+  lyricsWin.setIgnoreMouseEvents(!!locked, { forward: true });
+});
+ipcMain.on("lyrics:control", (_e, action) => {
+  if (action === "close") { lyricsWin?.close(); return; }
+  win?.webContents.send(`media:${action}`);
+});
+
 // ------------------------------------------------------------- tray + hotkeys
 function trayIcon() {
   const p = path.join(__dirname, "..", "build", "icon.png");
@@ -313,7 +353,8 @@ function buildTray() {
       { label: "Next", click: send("media:next") },
       { label: "Previous", click: send("media:prev") },
       { type: "separator" },
-      { label: "Dock to top of screen", type: "checkbox", checked: dock.on, click: (i) => setDocked(i.checked) },
+        { label: "Dock to top of screen", type: "checkbox", checked: dock.on, click: (i) => setDocked(i.checked) },
+      { label: "Desktop lyrics", type: "checkbox", checked: !!lyricsWin, click: (i) => (i.checked ? createLyricsWindow() : lyricsWin?.close()) },
       { type: "separator" },
       { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
     ]));
@@ -329,6 +370,7 @@ function registerHotkeys() {
     MediaStop: "media:stop",
     "CommandOrControl+Alt+D": "media:dock",
     "CommandOrControl+Alt+L": "media:lyrics",
+    "CommandOrControl+Alt+K": "media:desktopLyrics",
   };
   for (const [accel, ch] of Object.entries(map)) {
     try { globalShortcut.register(accel, () => { if (ch === "media:dock") setDocked(!dock.on); else win?.webContents.send(ch); }); } catch { /* taken */ }

@@ -251,3 +251,35 @@ export function sortTracks(tracks: Track[], col: ColumnKey, dir: "asc" | "desc")
 
 export const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 export const dbToGain = (db: number) => Math.pow(10, db / 20);
+
+
+// ---------------------------------------------------------------- AIMP sort presets
+/**
+ * AIMP lets you sort a playlist by a *template* (multiple fields at once),
+ * not just a single column. These are the presets its right-click menu offers,
+ * plus a few library-manager ones from MusicBee.
+ */
+export interface SortPreset { key: string; label: string; cols: { col: ColumnKey; dir: "asc" | "desc" }[] }
+
+export const SORT_PRESETS: SortPreset[] = [
+  { key: "albumOrder", label: "Album order (artist → album → disc → track)", cols: [{ col: "albumArtist", dir: "asc" }, { col: "year", dir: "asc" }, { col: "album", dir: "asc" }, { col: "discNo", dir: "asc" }, { col: "trackNo", dir: "asc" }] },
+  { key: "titleAZ", label: "Title A→Z", cols: [{ col: "title", dir: "asc" }] },
+  { key: "artistTitle", label: "Artist → title", cols: [{ col: "artist", dir: "asc" }, { col: "title", dir: "asc" }] },
+  { key: "newest", label: "Recently added", cols: [{ col: "lastPlayed", dir: "desc" }] },
+  { key: "mostPlayed", label: "Most played", cols: [{ col: "playCount", dir: "desc" }, { col: "rating", dir: "desc" }] },
+  { key: "topRated", label: "Top rated", cols: [{ col: "rating", dir: "desc" }, { col: "playCount", dir: "desc" }] },
+  { key: "bestQuality", label: "Best quality first", cols: [{ col: "quality", dir: "desc" }, { col: "bitrate", dir: "desc" }] },
+  { key: "longest", label: "Longest first", cols: [{ col: "duration", dir: "desc" }] },
+  { key: "djSet", label: "DJ set (Camelot → BPM)", cols: [{ col: "camelot", dir: "asc" }, { col: "bpm", dir: "asc" }] },
+  { key: "tempoUp", label: "Tempo ramp (slow → fast)", cols: [{ col: "bpm", dir: "asc" }] },
+  { key: "yearOld", label: "Chronological (oldest first)", cols: [{ col: "year", dir: "asc" }, { col: "album", dir: "asc" }, { col: "trackNo", dir: "asc" }] },
+  { key: "genre", label: "Genre → artist → album", cols: [{ col: "genre", dir: "asc" }, { col: "albumArtist", dir: "asc" }, { col: "album", dir: "asc" }] },
+];
+
+/** Multi-key stable sort used by the presets above. */
+export function sortTracksMulti(tracks: Track[], cols: { col: ColumnKey; dir: "asc" | "desc" }[]): Track[] {
+  let out = tracks.slice();
+  // apply least-significant key first so the sort stays stable overall
+  for (let i = cols.length - 1; i >= 0; i--) out = sortTracks(out, cols[i].col, cols[i].dir);
+  return out;
+}

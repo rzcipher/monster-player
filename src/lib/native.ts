@@ -35,6 +35,12 @@ export interface NativeApi {
   stat(path: string): Promise<{ size: number; mtime: number } | null>;
   reveal(path: string): void;
   openExternal(url: string): void;
+  toggleLyricsWindow(on: boolean): void;
+  pushLyrics(payload: {
+    line?: string; sub?: string; title?: string; artist?: string;
+    sweep?: number; progress?: number; accent?: string; accent2?: string; fontSize?: number;
+  }): void;
+  onLyricsClosed(cb: () => void): () => void;
   cli(payload: { action: string; path: string; isrc?: string; mbid?: string }): Promise<{ code: number; out: string }>;
   onMedia(cb: (key: MediaKey) => void): () => void;
   onOpenFiles(cb: (files: string[]) => void): () => void;

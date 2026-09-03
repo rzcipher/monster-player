@@ -7,6 +7,7 @@ import CoverGrid from "./components/CoverGrid";
 import ArtistsView from "./components/ArtistsView";
 import CoverBackdrop from "./components/CoverBackdrop";
 import { native } from "./lib/native";
+import { useDesktopLyrics } from "./lib/desktopLyrics";
 import PlayerBar from "./components/PlayerBar";
 import RightPanel from "./components/RightPanel";
 import NowPlaying from "./components/NowPlaying";
@@ -33,6 +34,7 @@ function MainArea() {
 export default function App() {
   const s = useStore();
   const [dragging, setDragging] = useState(false);
+  useDesktopLyrics();
 
   useEffect(() => { s.init(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

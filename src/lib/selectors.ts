@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useStore } from "../store";
-import { parseQuery, matchesQuery, sortTracks, matchesSmart } from "./util";
+import { parseQuery, matchesQuery, sortTracks, sortTracksMulti, matchesSmart, SORT_PRESETS } from "./util";
 import type { Track } from "../types";
 
 export function useVisibleTracks(): Track[] {
@@ -9,6 +9,7 @@ export function useVisibleTracks(): Track[] {
   const search = useStore((s) => s.search);
   const sortCol = useStore((s) => s.sortCol);
   const sortDir = useStore((s) => s.sortDir);
+  const sortPreset = useStore((s) => s.sortPreset);
   const playlists = useStore((s) => s.playlists);
   return useMemo(() => {
     let list: Track[];
@@ -31,9 +32,11 @@ export function useVisibleTracks(): Track[] {
       list = list.map((t) => [t, matchesQuery(t, pq)] as const).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]).map(([t]) => t);
       if (pq.text) return list; // relevance order for fuzzy text
     }
-    if (filter.kind === "playlist" && !playlists.find((x) => x.id === filter.id)?.smart && sortCol === "index") return list;
+    if (filter.kind === "playlist" && !playlists.find((x) => x.id === filter.id)?.smart && sortCol === "index" && !sortPreset) return list;
+    const preset = sortPreset ? SORT_PRESETS.find((p) => p.key === sortPreset) : null;
+    if (preset) return sortTracksMulti(list, preset.cols);
     return sortTracks(list, sortCol, sortDir);
-  }, [tracks, filter, search, sortCol, sortDir, playlists]);
+  }, [tracks, filter, search, sortCol, sortDir, sortPreset, playlists]);
 }
 
 export function bestSibling(t: Track, tracks: Track[]): Track | null {

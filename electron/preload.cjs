@@ -38,6 +38,14 @@ contextBridge.exposeInMainWorld("saltbee", {
   reveal: (p) => ipcRenderer.send("shell:reveal", p),
   openExternal: (u) => ipcRenderer.send("shell:open", u),
 
+  // Salt Player desktop lyrics (floating always-on-top window)
+  toggleLyricsWindow: (on) => ipcRenderer.send("lyrics:toggle", on),
+  pushLyrics: (payload) => ipcRenderer.send("lyrics:update", payload),
+  onLyricsData: on("lyrics:data"),
+  onLyricsClosed: on("lyrics:closed"),
+  lyricsControl: (action) => ipcRenderer.send("lyrics:control", action),
+  lyricsLock: (locked) => ipcRenderer.send("lyrics:lock", locked),
+
   // helpers
   cli: (payload) => ipcRenderer.invoke("cli:run", payload),
 

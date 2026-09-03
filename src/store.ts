@@ -76,6 +76,7 @@ interface State {
   search: string;
   sortCol: ColumnKey;
   sortDir: SortDir;
+  sortPreset: string | null;
   visibleCols: ColumnKey[];
   selected: string[];
   dsp: DspState;
@@ -143,6 +144,7 @@ interface State {
   setFilter: (f: LibraryFilter) => void;
   setSearch: (s: string) => void;
   setSort: (c: ColumnKey) => void;
+  setSortPreset: (key: string | null) => void;
   toggleCol: (c: ColumnKey) => void;
   setSelected: (ids: string[]) => void;
   setDsp: (p: Partial<DspState>) => void;
@@ -227,7 +229,7 @@ export const useStore = create<State>()(
   persist(
     (set, get) => ({
       tracks: [], playlists: [], queue: [], history: [], currentId: null, playing: false, shuffle: false, shuffleSeed: "saltbee", repeat: "off", keyMix: false,
-      view: "table", filter: { kind: "all" }, search: "", sortCol: "album", sortDir: "asc",
+      view: "table", filter: { kind: "all" }, search: "", sortCol: "album", sortDir: "asc", sortPreset: "albumOrder",
       visibleCols: ["index", "title", "artist", "album", "year", "genre", "bpm", "key", "camelot", "duration", "quality", "rating", "identity", "trim"],
       selected: [], dsp: DEFAULT_DSP, volume: 0.8, palette: DEFAULT_PALETTE, nowPlayingOpen: false, nowPlayingTab: "lyrics", fxOpen: false, fxTab: "General",
       settingsOpen: false, tagEditorId: null, smartEditorId: null, quarantineOpen: false, sleepOpen: false, docked: false, dockExpanded: false, dockRevealed: true, groupBy: "none", artistView: "tree", rightPanel: "queue",
@@ -485,7 +487,8 @@ export const useStore = create<State>()(
       setView: (view) => set({ view }),
       setFilter: (filter) => set({ filter, selected: [] }),
       setSearch: (search) => set({ search }),
-      setSort: (c) => { const s = get(); set(s.sortCol === c ? { sortDir: s.sortDir === "asc" ? "desc" : "asc" } : { sortCol: c, sortDir: "asc" }); },
+      setSort: (c) => { const s = get(); set({ sortPreset: null, ...(s.sortCol === c ? { sortDir: s.sortDir === "asc" ? "desc" : "asc" } : { sortCol: c, sortDir: "asc" as SortDir }) }); },
+      setSortPreset: (sortPreset) => set({ sortPreset }),
       toggleCol: (c) => { const v = get().visibleCols; set({ visibleCols: v.includes(c) ? v.filter((x) => x !== c) : [...v, c] }); },
       setSelected: (selected) => set({ selected }),
       setDsp: (p) => { const dsp = { ...get().dsp, ...p }; set({ dsp }); getEngine().applyDsp(dsp); get().syncNext(); },
@@ -657,7 +660,7 @@ export const useStore = create<State>()(
       name: "saltbee-v1",
       partialize: (s) => ({
         playlists: s.playlists, queue: s.queue, currentId: s.currentId, shuffle: s.shuffle, shuffleSeed: s.shuffleSeed, repeat: s.repeat, keyMix: s.keyMix,
-        view: s.view, sortCol: s.sortCol, sortDir: s.sortDir, visibleCols: s.visibleCols, dsp: s.dsp, volume: s.volume, docked: s.docked, rightPanel: s.rightPanel, groupBy: s.groupBy, artistView: s.artistView,
+        view: s.view, sortCol: s.sortCol, sortDir: s.sortDir, sortPreset: s.sortPreset, visibleCols: s.visibleCols, dsp: s.dsp, volume: s.volume, docked: s.docked, rightPanel: s.rightPanel, groupBy: s.groupBy, artistView: s.artistView,
         settings: s.settings, userData: s.userData, libraryRoots: s.libraryRoots, resumePos: s.resumePos, scrobbles: s.scrobbles.slice(0, 50), nowPlayingTab: s.nowPlayingTab,
       }),
       merge: (persisted, current) => ({ ...current, ...(persisted as Partial<State>), dsp: { ...DEFAULT_DSP, ...((persisted as Partial<State>)?.dsp || {}) } }),

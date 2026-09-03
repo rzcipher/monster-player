@@ -28,7 +28,7 @@ win:
     - target: portable
       arch: [x64]
   icon: build/icon.ico
-  artifactName: SaltBee-${version}-${arch}-${ext == "exe" ? "setup" : ext}.${ext}
+  artifactName: SaltBee-${version}-${arch}-${ext}.${ext}
   requestedExecutionLevel: asInvoker
 
 nsis:

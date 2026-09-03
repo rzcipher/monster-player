@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SaltBee — desktop lyrics</title>
+<style>
+  :root { --accent: #c084fc; --accent2: #8b5cf6; }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { height: 100%; background: transparent; overflow: hidden; font-family: "Segoe UI Variable", "Segoe UI", "Noto Sans JP", system-ui, sans-serif; }
+  #wrap {
+    height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; padding: 12px 22px; -webkit-app-region: drag; position: relative;
+    border-radius: 18px; transition: background 0.25s ease;
+  }
+  #wrap:hover { background: rgba(12, 10, 20, 0.55); backdrop-filter: blur(18px) saturate(1.4); }
+  .line {
+    font-weight: 800; letter-spacing: 0.01em; text-align: center; line-height: 1.22;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.85), 0 0 34px rgba(0,0,0,0.6);
+    max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* karaoke sweep: accent fills the text left-to-right over the line's duration */
+  #main {
+    font-size: 40px;
+    background-image: linear-gradient(to right, var(--accent) var(--sweep, 0%), rgba(255,255,255,0.86) var(--sweep, 0%));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #sub { font-size: 22px; font-weight: 600; color: rgba(255,255,255,0.62); }
+  #meta { position: absolute; top: 8px; left: 16px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.45); opacity: 0; transition: opacity 0.2s; }
+  #bar { position: absolute; left: 18px; right: 18px; bottom: 8px; height: 2px; border-radius: 2px; background: rgba(255,255,255,0.14); opacity: 0; transition: opacity 0.2s; }
+  #bar > i { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--accent2), var(--accent)); width: 0%; }
+  #ctl { position: absolute; top: 6px; right: 8px; display: flex; gap: 2px; opacity: 0; transition: opacity 0.2s; -webkit-app-region: no-drag; }
+  #wrap:hover #ctl, #wrap:hover #meta, #wrap:hover #bar { opacity: 1; }
+  button {
+    width: 28px; height: 28px; border: 0; border-radius: 8px; cursor: pointer;
+    background: rgba(255,255,255,0.1); color: #fff; font-size: 13px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  button:hover { background: rgba(255,255,255,0.22); }
+  button.on { background: var(--accent); color: #000; }
+  #idle { font-size: 20px; color: rgba(255,255,255,0.5); font-weight: 600; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="meta"></div>
+    <div id="main" class="line"></div>
+    <div id="sub" class="line"></div>
+    <div id="idle">SaltBee — nothing playing</div>
+    <div id="bar"><i></i></div>
+    <div id="ctl">
+      <button id="prev" title="Previous">⏮</button>
+      <button id="play" title="Play / pause">⏯</button>
+      <button id="next" title="Next">⏭</button>
+      <button id="lock" title="Click-through (lock in place)">🔒</button>
+      <button id="close" title="Close desktop lyrics">✕</button>
+    </div>
+  </div>
+
+<script>
+  const api = window.saltbee;
+  const $ = (id) => document.getElementById(id);
+  let locked = false;
+
+  api.onLyricsData((d) => {
+    const has = !!(d && (d.line || d.title));
+    $("idle").style.display = has ? "none" : "block";
+    $("main").style.display = has ? "block" : "none";
+    $("sub").style.display = has && d.sub ? "block" : "none";
+
+    if (!has) return;
+    $("main").textContent = d.line || d.title || "";
+    $("main").style.setProperty("--sweep", (d.sweep || 0) + "%");
+    $("sub").textContent = d.sub || "";
+    $("meta").textContent = [d.title, d.artist].filter(Boolean).join(" — ");
+    $("bar").firstElementChild.style.width = (d.progress || 0) * 100 + "%";
+    if (d.accent) document.documentElement.style.setProperty("--accent", d.accent);
+    if (d.accent2) document.documentElement.style.setProperty("--accent2", d.accent2);
+    if (d.fontSize) $("main").style.fontSize = d.fontSize + "px";
+  });
+
+  $("prev").onclick = () => api.lyricsControl("prev");
+  $("play").onclick = () => api.lyricsControl("playpause");
+  $("next").onclick = () => api.lyricsControl("next");
+  $("close").onclick = () => api.lyricsControl("close");
+  $("lock").onclick = (e) => {
+    locked = !locked;
+    e.currentTarget.classList.toggle("on", locked);
+    api.lyricsLock(locked);
+  };
+</script>
+</body>
+</html>

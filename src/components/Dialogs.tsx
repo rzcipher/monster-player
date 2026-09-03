@@ -157,6 +157,7 @@ export function SettingsDialog() {
           <div className="space-y-2">
             <Toggle checked={st.autoLrclib} onChange={(v) => s.setSetting("autoLrclib", v)} label="Fetch from LRCLIB when the file has no embedded lyrics" />
             <Toggle checked={st.showTranslation} onChange={(v) => s.setSetting("showTranslation", v)} label="Show translation line under each lyric (bilingual LRC)" />
+            <Toggle checked={st.desktopLyrics} onChange={(v) => s.setSetting("desktopLyrics", v)} label={native ? "Floating desktop lyrics — always-on-top overlay above every window (Ctrl+Alt+K)" : "Floating desktop lyrics (available in the packaged desktop app)"} />
             <Toggle checked={st.karaoke} onChange={(v) => s.setSetting("karaoke", v)} label="Karaoke sweep: fill the active line word-by-word as it plays" />
             <Toggle checked={st.immersion} onChange={(v) => s.setSetting("immersion", v)} label="Immersion mode (hide artwork in Now Playing)" />
           </div>

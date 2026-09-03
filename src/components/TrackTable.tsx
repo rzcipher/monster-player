@@ -1,11 +1,12 @@
 import { Fragment, useState, useCallback, useMemo, type ReactNode } from "react";
-import { ChevronUp, ChevronDown, ChevronRight, Play, ListPlus, ListEnd, Tag, FileText, Activity, Wand2, Languages, Mic2, ExternalLink, ArrowUpCircle, Trash2, ShieldCheck, LayoutGrid, Table2, Columns3, Sparkles, Users, Group, FolderOpen } from "lucide-react";
+import { ChevronUp, ChevronDown, ChevronRight, Play, ListPlus, ListEnd, Tag, FileText, Activity, Wand2, Languages, Mic2, ExternalLink, ArrowUpCircle, Trash2, ShieldCheck, LayoutGrid, Table2, Columns3, Sparkles, Users, Group, FolderOpen, ArrowDownWideNarrow } from "lucide-react";
 import { useStore } from "../store";
 import { useVisibleTracks, bestSibling } from "../lib/selectors";
 import { fmtTime, fmtLong, fmtSize, toCamelot } from "../lib/util";
 import type { ColumnKey, Track } from "../types";
 import { QualityBadge, CamelotChip, Stars, TrimKnob, ContextMenu, Cover, type MenuItem } from "./ui";
 import { groupTracks, GROUP_OPTIONS } from "../lib/grouping";
+import { SORT_PRESETS } from "../lib/util";
 import { native, openUrl } from "../lib/native";
 
 const COLS: { key: ColumnKey; label: string; w: number; align?: "right" | "center" }[] = [
@@ -63,6 +64,14 @@ export function Toolbar({ list }: { list: Track[] }) {
       <span>{list.length} / {fmtLong(total)} / {fmtSize(size)}</span>
       <div className="flex-1" />
       {s.selected.length > 1 && <span className="accent-text">{s.selected.length} selected</span>}
+      <label className="inline-flex items-center gap-1 hover:text-white" title="AIMP-style sort templates: order by several fields at once">
+        <ArrowDownWideNarrow size={13} />
+        <select value={s.sortPreset ?? "__col"} onChange={(e) => (e.target.value === "__col" ? s.setSortPreset(null) : s.setSortPreset(e.target.value))}
+          className="bg-transparent outline-none text-[11px] cursor-pointer max-w-[160px] [&>option]:bg-[#17141f] [&>option]:text-white">
+          <option value="__col">Sort: column ({s.sortCol} {s.sortDir})</option>
+          {SORT_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+      </label>
       <label className="inline-flex items-center gap-1 hover:text-white" title="AIMP-style grouping: bucket this list under collapsible headers">
         <Group size={13} />
         <select value={s.groupBy} onChange={(e) => s.setGroupBy(e.target.value as typeof s.groupBy)}
