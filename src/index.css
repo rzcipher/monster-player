@@ -45,7 +45,10 @@ body {
 
 .themed-bg { background: var(--c-bg); transition: background-color 0.8s ease; }
 .themed-surface { background: color-mix(in srgb, var(--c-surface) 92%, var(--c-accent) 8%); transition: background-color 0.8s ease; }
-.glass { background: color-mix(in srgb, var(--c-surface) 70%, transparent); backdrop-filter: blur(18px) saturate(1.3); }
+/* backdrop-filter is the single most expensive compositing primitive we use.
+   Keep the radius small and the element count low; heavier blur is reserved
+   for the one full-screen backdrop layer. */
+.glass { background: color-mix(in srgb, var(--c-surface) 82%, transparent); backdrop-filter: blur(10px) saturate(1.2); }
 .accent-text { color: var(--c-accent); }
 .accent-bg { background: var(--c-accent); }
 .border-subtle { border-color: color-mix(in srgb, var(--c-text) 8%, transparent); }
@@ -125,7 +128,7 @@ body { font-size: calc(13px * var(--font-scale)); }
   background: color-mix(in srgb, var(--c-surface) 62%, transparent);
   border: 1px solid color-mix(in srgb, var(--c-text) 7%, transparent);
   border-radius: var(--radius);
-  backdrop-filter: blur(20px) saturate(1.25);
+  backdrop-filter: blur(10px) saturate(1.15);
 }
 .accent-ring { box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-accent) 45%, transparent), 0 8px 30px -12px color-mix(in srgb, var(--c-accent) 60%, transparent); }
 .accent-glow { box-shadow: 0 10px 40px -12px color-mix(in srgb, var(--c-accent) 75%, transparent); }
@@ -153,7 +156,7 @@ body { font-size: calc(13px * var(--font-scale)); }
 .dock-strip:hover .dock-handle { width: 90px; background: var(--c-accent2); }
 .dock-strip {
   background: color-mix(in srgb, var(--c-surface) 86%, var(--c-accent) 14%);
-  backdrop-filter: blur(26px) saturate(1.5);
+  backdrop-filter: blur(12px) saturate(1.3);
   box-shadow: 0 12px 40px -12px #000c;
 }
 

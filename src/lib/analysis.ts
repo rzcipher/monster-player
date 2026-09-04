@@ -190,3 +190,31 @@ export function detectBpm(buf: AudioBuffer): number | null {
   while (bpm > 180) bpm /= 2;
   return Math.round(bpm);
 }
+
+
+/**
+ * Waveform peaks are only ever drawn for the *playing* track, but they were
+ * being kept on every analysed Track forever (~5.6 KB each as a boxed JS
+ * array — 110 MB across a 20k-track library). Keep a small LRU of Uint8
+ * arrays instead; regenerating one is cheap and only happens on demand.
+ */
+const WF_LIMIT = 24;
+const wfCache = new Map<string, Uint8Array>();
+
+export function setWaveform(key: string, peaks: number[]) {
+  const packed = new Uint8Array(peaks.length);
+  for (let i = 0; i < peaks.length; i++) packed[i] = Math.max(0, Math.min(255, Math.round(peaks[i] * 255)));
+  wfCache.delete(key);
+  wfCache.set(key, packed);
+  while (wfCache.size > WF_LIMIT) wfCache.delete(wfCache.keys().next().value!);
+}
+
+export function getWaveform(key: string): Uint8Array | null {
+  const hit = wfCache.get(key);
+  if (!hit) return null;
+  // refresh LRU position
+  wfCache.delete(key); wfCache.set(key, hit);
+  return hit;
+}
+
+export function clearWaveforms() { wfCache.clear(); }

@@ -12,7 +12,10 @@ export default function CoverBackdrop() {
   const strength = useStore((s) => s.settings.backdropStrength);
   const animations = useStore((s) => s.settings.animations);
   const currentId = useStore((s) => s.currentId);
-  const cover = useStore((s) => s.tracks.find((t) => t.id === currentId)?.coverUrl || null);
+  const cover = useStore((s) => {
+    const t = s.tracks.find((x) => x.id === currentId);
+    return t?.coverFull || t?.coverUrl || null;
+  });
 
   const [layers, setLayers] = useState<{ a: string | null; b: string | null; showA: boolean }>({ a: null, b: null, showA: true });
   const last = useRef<string | null>(null);
@@ -32,8 +35,15 @@ export default function CoverBackdrop() {
       style={{
         backgroundImage: url ? `url(${url})` : undefined,
         opacity: url && visible ? 0.34 * op : 0,
-        filter: `blur(${64 * (0.6 + op * 0.7)}px) saturate(1.7)`,
+        // Keep the blur radius modest. A 64px radius makes Chromium allocate
+        // and re-filter a very large GPU surface every frame the layer drifts;
+        // at 20px over an already-downscaled 900px cover the result looks the
+        // same but costs a fraction of the VRAM and fill rate.
+        filter: `blur(${Math.round(20 * (0.6 + op * 0.7))}px) saturate(1.6)`,
         transform: "scale(1.35)",
+        // hint that only opacity/transform change, so the layer isn't re-rastered
+        willChange: animations ? "opacity, transform" : "opacity",
+        backgroundSize: "cover",
         transition: animations ? "opacity 1.1s ease" : "none",
         animation: animations ? `${drift} 46s ease-in-out infinite alternate` : undefined,
       }}

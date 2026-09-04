@@ -19,7 +19,8 @@
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
-const { app } = require("electron");
+const crypto = require("crypto");
+const { app, nativeImage } = require("electron");
 
 const AUDIO_EXT = new Set([".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aif", ".aiff", ".aifc", ".wma", ".ape", ".wv", ".mpc", ".tta", ".dsf", ".dff", ".cue"]);
 const SKIP_DIRS = new Set(["node_modules", "$RECYCLE.BIN", "System Volume Information", "__MACOSX"]);
@@ -108,21 +109,58 @@ function pickCover(pictures) {
   if (!front || !front.data || !front.data.length) return null;
   const bytes = Buffer.from(front.data);
 
-  // FNV-1a over sampled bytes — cheap and good enough to dedupe artwork
-  let h = 0x811c9dc5;
-  const step = Math.max(1, Math.floor(bytes.length / 2048));
-  for (let i = 0; i < bytes.length; i += step) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }
+  // Hash the FULL buffer. A sampled hash collided across different album art
+  // (covers often share headers/palettes and differ only in the middle), which
+  // would silently show the wrong artwork. sha1 over ~200 KB is ~0.1 ms — far
+  // cheaper than the disk read we just did.
+  const digest = crypto.createHash("sha1").update(bytes).digest("hex").slice(0, 20);
   const ext = /png/i.test(front.format || "") ? "png" : "jpg";
-  const id = `${bytes.length.toString(36)}-${(h >>> 0).toString(36)}.${ext}`;
+  const id = `${digest}.${ext}`;
   const file = path.join(artDir(), id);
 
   try {
     if (!fs.existsSync(file)) {
       fs.mkdirSync(artDir(), { recursive: true });
-      fs.writeFileSync(file, bytes);
+      writeResized(file, bytes, id);
     }
   } catch { return null; }
   return id;
+}
+
+/**
+ * Write two derivatives instead of the raw embedded image.
+ *
+ * Chromium decodes artwork to uncompressed RGBA when it paints: a 3000x3000
+ * cover costs ~34 MB of renderer/GPU memory *each*. Lists only ever show them
+ * a few hundred pixels wide, so storing the original was the single biggest
+ * driver of GPU + renderer RSS.
+ *
+ *   <id>       thumbnail (320px) — grids, tables, the dock
+ *   <id>.full  detail (900px)    — Now Playing / backdrop
+ */
+const THUMB_PX = 320;
+const FULL_PX = 900;
+
+function writeResized(file, bytes, id) {
+  let img;
+  try { img = nativeImage.createFromBuffer(bytes); } catch { img = null; }
+  if (!img || img.isEmpty()) { fs.writeFileSync(file, bytes); return; }
+
+  const { width, height } = img.getSize();
+  const isPng = id.endsWith(".png");
+  const encode = (im) => (isPng ? im.toPNG() : im.toJPEG(86));
+
+  const big = Math.max(width, height);
+  const thumb = big > THUMB_PX ? img.resize({ width: Math.max(1, Math.round(width * THUMB_PX / big)), quality: "good" }) : img;
+  fs.writeFileSync(file, encode(thumb));
+
+  // only keep a separate large copy when it's meaningfully bigger
+  if (big > FULL_PX * 1.15) {
+    const full = img.resize({ width: Math.max(1, Math.round(width * FULL_PX / big)), quality: "good" });
+    fs.writeFileSync(file + ".full", encode(full));
+  } else if (big > THUMB_PX) {
+    fs.writeFileSync(file + ".full", encode(img));
+  }
 }
 
 function firstTag(native, keys) {
@@ -269,7 +307,8 @@ function pruneArtwork() {
     const used = new Set();
     for (const r of index.values()) if (r.coverId) used.add(r.coverId);
     for (const f of fs.readdirSync(artDir())) {
-      if (!used.has(f)) { try { fs.unlinkSync(path.join(artDir(), f)); } catch { /* ignore */ } }
+      const base = f.endsWith(".full") ? f.slice(0, -5) : f;
+      if (!used.has(base)) { try { fs.unlinkSync(path.join(artDir(), f)); } catch { /* ignore */ } }
     }
   } catch { /* no artwork dir yet */ }
 }

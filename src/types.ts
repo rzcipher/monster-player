@@ -49,7 +49,8 @@ export interface Track {
   playCount: number;
   lastPlayed: number | null;
   added: number;
-  coverUrl: string | null;
+  coverUrl: string | null;      // thumbnail (320px) for lists
+  coverFull?: string | null;    // larger derivative for full-screen views
   lyrics: LyricLine[] | null;
   lyricsSource: "embedded" | "lrclib" | "none";
   // --- dedupe / quarantine ---
@@ -64,7 +65,7 @@ export interface Track {
   file?: File;
   handle?: FileSystemFileHandle;
   demoSeed?: number;
-  waveform?: number[]; // 0..1 peaks
+  // waveform peaks live in a bounded LRU in lib/analysis.ts, not on the Track
   energy?: number; // 0..1
 }
 

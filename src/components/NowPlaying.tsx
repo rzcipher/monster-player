@@ -113,7 +113,7 @@ export default function NowPlaying() {
   return (
     <div className="fixed inset-0 z-[100] text-white fade-in overflow-hidden select-none" style={{ background: "var(--c-bg)" }}>
       {/* blurred cover backdrop */}
-      {t.coverUrl && <img src={t.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ filter: "blur(70px) saturate(1.2) brightness(0.55)", transform: "scale(1.4)" }} />}
+      {t.coverUrl && <img src={t.coverFull || t.coverUrl} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" style={{ filter: "blur(70px) saturate(1.2) brightness(0.55)", transform: "scale(1.4)" }} />}
       <div className="absolute inset-0" style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.25), rgba(0,0,0,0.1) 40%, rgba(10,8,20,0.85))" }} />
 
       <div className="relative h-full flex flex-col max-w-[1100px] mx-auto px-8 pt-6 pb-6">
@@ -121,7 +121,7 @@ export default function NowPlaying() {
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-5 min-w-0">
             <button onClick={s.closeNowPlaying} className="mt-2 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 inline-flex items-center justify-center shrink-0"><ChevronDown size={20} /></button>
-            {!immersion && <Cover url={t.coverUrl} size={92} rounded="rounded-xl" className={`shadow-2xl ${tab === "lyrics" ? "hidden" : ""}`} />}
+            {!immersion && <Cover url={t.coverFull || t.coverUrl} size={92} rounded="rounded-xl" className={`shadow-2xl ${tab === "lyrics" ? "hidden" : ""}`} />}
             <div className="min-w-0">
               <div className="text-[40px] font-bold leading-tight truncate">{t.title}</div>
               <div className="text-[20px] text-white/70 truncate">{t.artist}</div>

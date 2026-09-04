@@ -7,7 +7,7 @@ import { DEFAULT_PALETTE, extractPalette, applyPalette, staticPalette, type Them
 import { native, nativeBytes, artUrl, type LibRecord } from "./lib/native";
 import { releaseCover, releaseAllCovers } from "./lib/covers";
 import { seededShuffle, uid, dupKey, camelotCompatible, matchesSmart, qualityScore } from "./lib/util";
-import { analyzeLoudness, detectKey, detectBpm, waveformPeaks } from "./lib/analysis";
+import { analyzeLoudness, detectKey, detectBpm, waveformPeaks, setWaveform } from "./lib/analysis";
 import { fetchLrclib, plainToLines, parseLrc } from "./lib/lyrics";
 import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseBytes, blankTrack } from "./lib/metadata";
 
@@ -218,7 +218,7 @@ function afterTrackChange(t: Track) {
   s.updateTrack(t.id, { playCount: t.playCount + 1, lastPlayed: Date.now() });
   s.syncNext();
   s.retheme();
-  if (!t.waveform || t.analyzedGain === null) s.analyzeTrack(t.id);
+  if (t.analyzedGain === null) s.analyzeTrack(t.id);
   if (!t.lyrics && s.settings.autoLrclib) s.fetchLyrics(t.id);
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: t.coverUrl ? [{ src: t.coverUrl, sizes: "512x512" }] : [] });
@@ -269,7 +269,8 @@ function recordToTrack(r: LibRecord, userData: State["userData"]): Track {
   t.key = r.key || "";
   t.rgTrackGain = r.rgTrackGain;
   t.rgTrackPeak = r.rgTrackPeak;
-  t.coverUrl = artUrl(r.coverId);
+  t.coverUrl = artUrl(r.coverId);          // 320px — lists, grids, dock
+  t.coverFull = artUrl(r.coverId, "full"); // 900px — Now Playing / backdrop
   if (r.lyrics) {
     if (r.lyrics.synced) {
       const mul = r.lyrics.ms ? 0.001 : 0.026;
@@ -673,8 +674,9 @@ export const useStore = create<State>()(
           // transient decode: the PCM is thrown away as soon as we're done with it
           const buf = await getEngine().decodeTransient(t);
           const { gain, peak, energy } = analyzeLoudness(buf);
-          const wf = waveformPeaks(buf);
-          const patch: Partial<Track> = { analyzedGain: gain, analyzedPeak: peak, waveform: wf, energy };
+          // waveform goes to a bounded LRU, not onto the Track object
+          setWaveform(t.path || t.id, waveformPeaks(buf));
+          const patch: Partial<Track> = { analyzedGain: gain, analyzedPeak: peak, energy };
           if (!t.key) { const k = detectKey(buf); if (k.confidence > 0.2) patch.analyzedKey = k.key; }
           if (!t.bpm) patch.analyzedBpm = detectBpm(buf);
           get().updateTrack(id, patch);

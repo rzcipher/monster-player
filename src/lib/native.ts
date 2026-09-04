@@ -23,9 +23,16 @@ export interface LibRecord {
   parseError?: boolean;
 }
 
-/** Resolve an indexed cover id to a URL Chromium can cache and evict itself. */
-export function artUrl(coverId: string | null): string | null {
-  return coverId ? `saltbee-art://art/${encodeURIComponent(coverId)}` : null;
+/**
+ * Resolve an indexed cover id to a URL Chromium can cache and evict itself.
+ *
+ * Always prefer "thumb" for lists/grids — a full-resolution cover decodes to
+ * tens of megabytes of RGBA, and we only ever show it a few hundred px wide.
+ */
+export function artUrl(coverId: string | null, size: "thumb" | "full" = "thumb"): string | null {
+  if (!coverId) return null;
+  const id = size === "full" ? `${coverId}.full` : coverId;
+  return `saltbee-art://art/${encodeURIComponent(id)}`;
 }
 
 export interface LibProgress {

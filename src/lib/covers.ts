@@ -19,11 +19,17 @@ interface Entry { url: string; refs: number }
 
 const byHash = new Map<string, Entry>();
 
-/** FNV-1a over a sampled subset of the bytes — fast and collision-safe enough here. */
+/**
+ * FNV-1a over every byte.
+ *
+ * An earlier version sampled every Nth byte to save time, but album art often
+ * shares headers and palettes and differs only in the middle — so distinct
+ * covers collided and tracks showed the wrong image. Hashing in full is a few
+ * hundred microseconds and removes the whole class of bug.
+ */
 function hashBytes(bytes: Uint8Array): string {
   let h = 0x811c9dc5;
-  const step = Math.max(1, Math.floor(bytes.length / 4096));
-  for (let i = 0; i < bytes.length; i += step) {
+  for (let i = 0; i < bytes.length; i++) {
     h ^= bytes[i];
     h = Math.imul(h, 0x01000193);
   }

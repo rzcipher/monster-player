@@ -490,7 +490,11 @@ else {
     protocol.handle("saltbee-art", (req) => {
       const id = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ""));
       if (!id || id.includes("..") || id.includes("/") || id.includes("\\")) return new Response(null, { status: 400 });
-      return net.fetch(pathToFileURL(path.join(library.artDir(), id)).toString());
+      let file = path.join(library.artDir(), id);
+      // ".full" is optional — small covers only have the one derivative
+      if (id.endsWith(".full") && !fs.existsSync(file)) file = file.slice(0, -5);
+      if (!fs.existsSync(file)) return new Response(null, { status: 404 });
+      return net.fetch(pathToFileURL(file).toString());
     });
     const n = library.loadIndex();
     if (n) console.log(`[SaltBee] library index loaded: ${n} tracks`);

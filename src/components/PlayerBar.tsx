@@ -2,13 +2,19 @@ import { useEffect, useRef } from "react";
 import { Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, Volume2, VolumeX, Music2, MicVocal, ListMusic, Timer } from "lucide-react";
 import { useStore } from "../store";
 import { usePosition, useNow } from "../hooks";
+import { getWaveform } from "../lib/analysis";
 import { fmtTime, toCamelot } from "../lib/util";
 import { Cover, QualityBadge } from "./ui";
 
 export function Waveform({ height = 34, className = "" }: { height?: number; className?: string }) {
   // Subscribe narrowly: this canvas repaints ~15x/s and must not be tied to
   // the whole store (which would re-render it on every unrelated change).
-  const wf = useStore((s) => s.tracks.find((x) => x.id === s.currentId)?.waveform);
+  // waveform lives in a bounded LRU keyed by path, not on the Track object
+  const wfKey = useStore((s) => {
+    const t = s.tracks.find((x) => x.id === s.currentId);
+    return t ? t.path || t.id : null;
+  });
+  const wf = wfKey ? getWaveform(wfKey) : null;
   const seek = useStore((s) => s.seek);
   const { pos, dur, transition } = usePosition(15);
   const ref = useRef<HTMLCanvasElement>(null);
@@ -32,7 +38,7 @@ export function Waveform({ height = 34, className = "" }: { height?: number; cla
     const accent = css.getPropertyValue("--c-accent").trim() || "#8b5cf6";
     const accent2 = css.getPropertyValue("--c-accent2").trim() || "#c084fc";
     for (let i = 0; i < n; i++) {
-      const v = wf ? wf[i] : 0.25 + 0.15 * Math.sin(i / 6) * Math.cos(i / 17);
+      const v = wf ? wf[i] / 255 : 0.25 + 0.15 * Math.sin(i / 6) * Math.cos(i / 17);
       const h = Math.max(2, v * (H - 4));
       const x = i * bw;
       const played = i / n <= progress;
@@ -48,7 +54,7 @@ export function Waveform({ height = 34, className = "" }: { height?: number; cla
       g.fillStyle = accent2; g.fillRect(x0 + (W - x0) * transition.progress - 1, 0, 2, H);
     }
     g.fillStyle = "#fff"; g.fillRect(W * progress - 0.5, 0, 1, H);
-  }, [wf, pos, dur, height, transition]);
+  }, [wf, wfKey, pos, dur, height, transition]);
   const onSeek = (e: React.MouseEvent) => { const r = e.currentTarget.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * dur); };
   return <canvas ref={ref} onClick={onSeek} className={`w-full cursor-pointer ${className}`} style={{ height }} />;
 }

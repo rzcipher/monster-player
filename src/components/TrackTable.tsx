@@ -233,8 +233,8 @@ export default function TrackTable() {
                   <tr key={"g:" + g.key} className="group/gh">
                     <td colSpan={cols.length} className="p-0">
                       <div onClick={() => toggleGroup(g.key)} onDoubleClick={() => s.playTrack(gIds[0], gIds)}
-                        className="flex items-center gap-2.5 px-2 py-1.5 cursor-default sticky top-8 z-[5] backdrop-blur-md border-y border-subtle"
-                        style={{ background: "color-mix(in srgb, var(--c-surface) 82%, var(--c-accent) 18%)" }}>
+                        className="flex items-center gap-2.5 px-2 py-1.5 cursor-default sticky top-8 z-[5] border-y border-subtle"
+                        style={{ background: "color-mix(in srgb, var(--c-bg) 88%, var(--c-accent) 12%)" }}>
                         <ChevronRight size={13} className={`text-muted transition-transform shrink-0 ${isCollapsed ? "" : "rotate-90"}`} />
                         {s.groupBy === "album" || s.groupBy === "folder" ? <Cover url={g.cover} size={28} rounded="rounded" /> : null}
                         <span className="text-[12px] font-semibold truncate max-w-[420px]">{g.label}</span>

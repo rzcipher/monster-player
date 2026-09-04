@@ -101,11 +101,12 @@ export class AudioEngine {
    * heaviest thing in the process. We only ever need the playing deck and the
    * pre-decoded next deck, and those hold their buffers directly — so the
    * cache exists purely to make a re-play of the *immediately* previous track
-   * instant. Budget it in bytes, not entries.
+   * instant. Budget it in bytes, not entries — and keep that budget small: the
+   * decks hold their own buffers, so this is a nicety, not a requirement.
    */
   bufferCache = new Map<string, AudioBuffer>();
   private cacheBytes = 0;
-  private static readonly CACHE_BUDGET = 192 * 1024 * 1024;
+  private static readonly CACHE_BUDGET = 48 * 1024 * 1024;
   get cacheSize() { return this.cacheBytes; }
   outputInfo = { sampleRate: 0, latency: 0, sink: "default" };
   matchSourceRate = false;
