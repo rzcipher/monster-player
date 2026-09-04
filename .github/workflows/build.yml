@@ -18,9 +18,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run dist:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run dist:win -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: SaltBee-windows
@@ -45,7 +43,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run dist:linux
+      - run: npm run dist:linux -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: SaltBee-linux
@@ -54,6 +52,8 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
+    # Only gate on Windows: the Linux AppImage job is allowed to fail (the
+    # runner lacks FUSE) and must not block publishing the .exe.
     needs: [windows]
     runs-on: ubuntu-latest
     permissions:
