@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { X, ChevronDown } from "lucide-react";
-import { useStore, EQ_PRESETS, getEngine } from "../store";
+import { EQ_PRESETS, getEngine } from "../store";
+import { useTracked } from "../lib/tracked";
 import { EQ_BANDS } from "../engine/AudioEngine";
 import type { CurveType, DspState } from "../types";
 
@@ -41,7 +42,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export default function SoundEffects() {
-  const s = useStore();
+  const s = useTracked();
   const d = s.dsp;
   const set = (p: Partial<DspState>) => s.setDsp(p);
   const [tab, setTab] = useState(s.fxTab || "General");

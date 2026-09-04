@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 import { Play, ChevronRight, Shuffle, ListPlus, Users, Disc3, Clock } from "lucide-react";
-import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import { buildArtists, type ArtistEntry, type ArtistAlbum } from "../lib/grouping";
 import { fmtTime } from "../lib/util";
 import { Cover, Stars, QualityBadge, CamelotChip, ContextMenu, type MenuItem } from "./ui";
@@ -19,7 +19,7 @@ function fmtDur(sec: number) {
  * tags) with an expandable track list.
  */
 export default function ArtistsView() {
-  const s = useStore();
+  const s = useTracked();
   const menu = useTrackMenu();
   const [sel, setSel] = useState<string | null>(null);
   const [openAlbum, setOpenAlbum] = useState<string | null>(null);
@@ -170,7 +170,7 @@ function ArtistHeader({ a, onPlay, onShuffle, onQueue }: { a: ArtistEntry; onPla
 }
 
 function AlbumRow({ al, open, onToggle, onCtx }: { al: ArtistAlbum; open: boolean; onToggle: () => void; onCtx: (e: React.MouseEvent, t: Track) => void }) {
-  const s = useStore();
+  const s = useTracked();
   const ids = al.tracks.map((t) => t.id);
   const discs = [...new Set(al.tracks.map((t) => t.discNo || 1))].sort((a, b) => a - b);
   return (

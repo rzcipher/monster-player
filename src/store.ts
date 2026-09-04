@@ -41,6 +41,8 @@ export interface Settings {
   showTranslation: boolean;
   immersion: boolean;
   autoAnalyze: boolean;
+  /** Force the full-PCM engine: enables independent pitch shift and silence trimming, at ~85 MB per loaded track. */
+  precisionEngine: boolean;
   outputDevice: string;
   autoQuarantine: boolean;
   // --- Salt Player theming ---
@@ -61,7 +63,7 @@ export interface Settings {
 
 export interface UserData { rating: number; playCount: number; lastPlayed: number | null; trim: number; lyricsOverride?: string }
 
-interface State {
+export interface State {
   tracks: Track[];
   playlists: Playlist[];
   queue: string[];
@@ -195,6 +197,7 @@ export function getEngine(): AudioEngine {
     engine = new AudioEngine(useStore.getState().dsp);
     engine.setVolume(useStore.getState().volume);
     engine.matchSourceRate = useStore.getState().settings.matchSourceRate;
+    engine.precision = useStore.getState().settings.precisionEngine;
     engine.onStatus = (m) => useStore.getState().setStatus(m);
     engine.onAdvance = (t) => {
       const s = useStore.getState();
@@ -211,6 +214,22 @@ export function getEngine(): AudioEngine {
 }
 
 let sleepTimer: number | null = null;
+let analysisTimer: number | null = null;
+
+/**
+ * Memoised seeded shuffle.
+ *
+ * `computeNextId()` is called from render paths that tick ~10x/s, and it
+ * reshuffled the entire queue every time. The order only depends on (queue,
+ * seed), both of which change rarely, so cache the last result.
+ */
+let shuffleCache: { queue: string[]; seed: string; order: string[] } | null = null;
+function shuffledQueue(queue: string[], seed: string): string[] {
+  if (shuffleCache && shuffleCache.queue === queue && shuffleCache.seed === seed) return shuffleCache.order;
+  const order = seededShuffle(queue, seed);
+  shuffleCache = { queue, seed, order };
+  return order;
+}
 let posSaver: number | null = null;
 
 function afterTrackChange(t: Track) {
@@ -218,7 +237,21 @@ function afterTrackChange(t: Track) {
   s.updateTrack(t.id, { playCount: t.playCount + 1, lastPlayed: Date.now() });
   s.syncNext();
   s.retheme();
-  if (t.analyzedGain === null) s.analyzeTrack(t.id);
+  // Loudness analysis reads the whole file and decodes it. Doing that the
+  // instant a track starts competes with the transition and audibly stutters.
+  // Defer it, and only bother when something actually consumes the result:
+  // on-the-fly ReplayGain, or the user asking for auto-analyse.
+  if (analysisTimer !== null) { clearTimeout(analysisTimer); analysisTimer = null; }
+  const wantsAnalysis = t.analyzedGain === null &&
+    ((s.dsp.rgOn && s.dsp.rgOnTheFly && !(s.dsp.rgFromTags && t.rgTrackGain !== null)) || s.settings.autoAnalyze);
+  if (wantsAnalysis) {
+    const wantId = t.id;
+    analysisTimer = window.setTimeout(() => {
+      analysisTimer = null;
+      const st = useStore.getState();
+      if (st.currentId === wantId) st.analyzeTrack(wantId);
+    }, 3500);
+  }
   if (!t.lyrics && s.settings.autoLrclib) s.fetchLyrics(t.id);
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: t.coverUrl ? [{ src: t.coverUrl, sizes: "512x512" }] : [] });
@@ -296,7 +329,7 @@ export const useStore = create<State>()(
       settingsOpen: false, tagEditorId: null, smartEditorId: null, quarantineOpen: false, sleepOpen: false, docked: false, dockExpanded: false, dockRevealed: true, groupBy: "none", artistView: "tree", rightPanel: "queue",
       sleepEndsAt: null, scrobbles: [], status: "Ready", scan: { active: false, done: 0, total: 0, current: "" }, userData: {}, resumePos: 0,
       analysisQueue: [], analyzing: false, outputs: [], libraryName: "Demo library", libraryRoots: [], contextMenu: null, promptReq: null,
-      settings: { listenBrainzToken: "", listenBrainzUser: "", cliBridgeUrl: "http://127.0.0.1:7788", matchSourceRate: false, resumeOnStart: true, autoLrclib: true, showTranslation: true, immersion: false, autoAnalyze: false, outputDevice: "", autoQuarantine: true,
+      settings: { listenBrainzToken: "", listenBrainzUser: "", cliBridgeUrl: "http://127.0.0.1:7788", matchSourceRate: false, resumeOnStart: true, autoLrclib: true, showTranslation: true, immersion: false, autoAnalyze: false, precisionEngine: false, outputDevice: "", autoQuarantine: true,
         themeMode: "adaptive", adaptiveTheme: true, coverBackdrop: true, backdropStrength: 0.5, animations: true, karaoke: true, desktopLyrics: false, cornerRadius: 12, fontScale: 1,
         dockAutoHide: true, dockOpacity: 1, alwaysOnTop: false },
 
@@ -534,7 +567,7 @@ export const useStore = create<State>()(
         const pid = h.pop();
         if (pid && s.tracks.some((t) => t.id === pid)) { set({ history: h }); await get().playTrack(pid); }
         else {
-          const order = s.shuffle ? seededShuffle(s.queue, s.shuffleSeed) : s.queue;
+          const order = s.shuffle ? shuffledQueue(s.queue, s.shuffleSeed) : s.queue;
           const i = order.indexOf(s.currentId || "");
           if (i > 0) await get().playTrack(order[i - 1]);
         }
@@ -553,7 +586,7 @@ export const useStore = create<State>()(
         const cur = fromId === undefined ? s.currentId : fromId;
         if (!cur) return s.queue[0] || null;
         if (s.repeat === "one") return cur;
-        const order = s.shuffle ? seededShuffle(s.queue, s.shuffleSeed) : s.queue;
+        const order = s.shuffle ? shuffledQueue(s.queue, s.shuffleSeed) : s.queue;
         const i = order.indexOf(cur);
         const curT = s.tracks.find((t) => t.id === cur);
         if (s.keyMix && curT) {
@@ -562,7 +595,9 @@ export const useStore = create<State>()(
           if (unplayed.length) return unplayed[0].id;
         }
         if (s.repeat === "album" && curT) {
-          const albumIds = order.filter((id) => { const t = s.tracks.find((x) => x.id === id); return t && t.album === curT.album && t.albumArtist === curT.albumArtist; });
+          // index once instead of a linear find per queued id
+          const byId = new Map(s.tracks.map((t) => [t.id, t] as const));
+          const albumIds = order.filter((id) => { const t = byId.get(id); return t && t.album === curT.album && t.albumArtist === curT.albumArtist; });
           const ai = albumIds.indexOf(cur);
           return albumIds[(ai + 1) % albumIds.length] || cur;
         }
@@ -744,6 +779,7 @@ export const useStore = create<State>()(
       setSetting: (k, v) => {
         set({ settings: { ...get().settings, [k]: v } });
         if (k === "matchSourceRate") getEngine().matchSourceRate = v as boolean;
+        if (k === "precisionEngine") getEngine().precision = v as boolean;
         if (k === "outputDevice") getEngine().setSink(v as string);
         if (k === "autoQuarantine") get().recomputeDupes();
       },
@@ -823,7 +859,24 @@ export const useStore = create<State>()(
         view: s.view, sortCol: s.sortCol, sortDir: s.sortDir, sortPreset: s.sortPreset, visibleCols: s.visibleCols, dsp: s.dsp, volume: s.volume, docked: s.docked, rightPanel: s.rightPanel, groupBy: s.groupBy, artistView: s.artistView,
         settings: s.settings, userData: s.userData, libraryRoots: s.libraryRoots, resumePos: s.resumePos, scrobbles: s.scrobbles.slice(0, 50), nowPlayingTab: s.nowPlayingTab,
       }),
-      merge: (persisted, current) => ({ ...current, ...(persisted as Partial<State>), dsp: { ...DEFAULT_DSP, ...((persisted as Partial<State>)?.dsp || {}) } }),
+      /**
+       * Deep-merge the nested config objects.
+       *
+       * A plain spread replaced `settings` wholesale with whatever was on disk,
+       * so any key added in a new version came back `undefined` for existing
+       * users — settings silently "reset" on upgrade, and booleans that should
+       * default to true read as false. Merging each nested object over its
+       * defaults keeps old preferences and fills in new keys.
+       */
+      merge: (persisted, current) => {
+        const p = (persisted || {}) as Partial<State>;
+        return {
+          ...current,
+          ...p,
+          settings: { ...current.settings, ...(p.settings || {}) },
+          dsp: { ...DEFAULT_DSP, ...(p.dsp || {}) },
+        };
+      },
     },
   ),
 );

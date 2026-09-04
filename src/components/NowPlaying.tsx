@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Play, Pause, SkipBack, SkipForward, Repeat, Repeat1, Timer, AudioWaveform, ListMusic, MoreHorizontal, Radio, Sun, Palmtree, BarChart3, Music2, Languages, Disc3, ExternalLink, CheckCircle2, Shuffle, Sparkles } from "lucide-react";
-import { useStore, getEngine } from "../store";
+import { getEngine } from "../store";
+import { useTracked } from "../lib/tracked";
 import { usePosition, useSpectrum, useNow } from "../hooks";
 import { currentLineIndex, lrclibSearchUrl } from "../lib/lyrics";
 import { fmtTime, toCamelot } from "../lib/util";
 import { Cover, ContextMenu, type MenuItem } from "./ui";
 import { useTrackMenu } from "./TrackTable";
 import { openUrl } from "../lib/native";
+import { makeBlurred, peekBlurred } from "../lib/blur";
 
 function Tile({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active?: boolean; onClick: () => void }) {
   return (
@@ -20,7 +22,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 
 function Lyrics({ pos }: { pos: number }) {
-  const s = useStore();
+  const s = useTracked();
   const t = s.tracks.find((x) => x.id === s.currentId);
   const lines = t?.lyrics || null;
   const idx = lines ? currentLineIndex(lines, pos) : -1;
@@ -59,7 +61,11 @@ function Lyrics({ pos }: { pos: number }) {
           <div key={i} onClick={() => s.seek(l.time)} className="lyric-line cursor-pointer py-4"
             style={{
               opacity: idx < 0 ? 0.5 : active ? 1 : Math.max(0.16, 0.55 - d * 0.1),
-              filter: active || idx < 0 ? "none" : `blur(${Math.min(2.5, d * 0.7)}px)`,
+              // Every blurred line is its own compositor layer + filter. Only
+              // the handful of lines around the active one are actually
+              // legible enough for the blur to read, so skip it beyond that
+              // and let the opacity ramp do the work.
+              filter: active || idx < 0 || d > 4 ? "none" : `blur(${Math.min(2.5, d * 0.7)}px)`,
               transform: active ? "scale(1)" : "scale(0.94)",
             }}>
             <div
@@ -92,12 +98,21 @@ function Spectrum() {
 }
 
 export default function NowPlaying() {
-  const s = useStore();
+  const s = useTracked();
   const t = s.tracks.find((x) => x.id === s.currentId) || null;
   const { pos, dur } = usePosition(15);
   const now = useNow();
   const menu = useTrackMenu();
   const [ctx, setCtx] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  // Pre-blurred backdrop texture; falls back to a live CSS blur until ready.
+  const bdSrc = t?.coverFull || t?.coverUrl || null;
+  const [npBackdrop, setNpBackdrop] = useState<string | null>(() => peekBlurred(bdSrc));
+  useEffect(() => {
+    let alive = true;
+    setNpBackdrop(peekBlurred(bdSrc));
+    if (bdSrc) makeBlurred(bdSrc).then((u) => { if (alive) setNpBackdrop(u); });
+    return () => { alive = false; };
+  }, [bdSrc]);
   const tab = s.nowPlayingTab;
   const artists = useMemo(() => (t ? t.artist.split(/;|,|feat\./i).map((a) => a.trim()).filter(Boolean) : []), [t]);
   const countFor = (a: string) => s.tracks.filter((x) => !x.quarantined && x.artist.toLowerCase().includes(a.toLowerCase())).length;
@@ -113,7 +128,24 @@ export default function NowPlaying() {
   return (
     <div className="fixed inset-0 z-[100] text-white fade-in overflow-hidden select-none" style={{ background: "var(--c-bg)" }}>
       {/* blurred cover backdrop */}
-      {t.coverUrl && <img src={t.coverFull || t.coverUrl} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" style={{ filter: "blur(70px) saturate(1.2) brightness(0.55)", transform: "scale(1.4)" }} />}
+      {/*
+        Backdrop. A live blur(70px) over a full-screen image makes the
+        compositor allocate and filter a very large GPU surface; baking the
+        blur into a 48px texture and letting it scale up looks the same and
+        costs one small upload.
+      */}
+      {t.coverUrl && (
+        <div
+          className="absolute inset-0 bg-center"
+          style={{
+            backgroundImage: `url(${npBackdrop || t.coverFull || t.coverUrl})`,
+            backgroundSize: "cover",
+            filter: npBackdrop ? "saturate(1.2) brightness(0.55)" : "blur(70px) saturate(1.2) brightness(0.55)",
+            transform: "scale(1.4)",
+            willChange: "opacity",
+          }}
+        />
+      )}
       <div className="absolute inset-0" style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.25), rgba(0,0,0,0.1) 40%, rgba(10,8,20,0.85))" }} />
 
       <div className="relative h-full flex flex-col max-w-[1100px] mx-auto px-8 pt-6 pb-6">

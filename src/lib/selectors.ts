@@ -45,3 +45,53 @@ export function bestSibling(t: Track, tracks: Track[]): Track | null {
   const best = g.reduce<Track | null>((a, b) => (!a || b.qualityScore > a.qualityScore ? b : a), null);
   return best && best.qualityScore > t.qualityScore ? best : null;
 }
+
+/**
+ * Identity-keyed track index.
+ *
+ * Several places resolved ids with `tracks.find(t => t.id === id)` inside a
+ * loop — the queue panel did it once per queued track, which is O(n·m) and on
+ * a whole-library queue meant tens of millions of comparisons per render.
+ * The map is rebuilt only when the `tracks` array identity changes.
+ */
+export function useTrackById(): Map<string, Track> {
+  const tracks = useStore((s) => s.tracks);
+  return useMemo(() => {
+    const m = new Map<string, Track>();
+    for (const t of tracks) m.set(t.id, t);
+    return m;
+  }, [tracks]);
+}
+
+export interface DupInfo {
+  /** every track sharing each dupGroup key */
+  groups: Map<string, Track[]>;
+  /** per track id: the higher-quality sibling to point at, if any */
+  better: Map<string, Track>;
+}
+
+/**
+ * Duplicate-group index, computed once per `tracks` change.
+ *
+ * `bestSibling()` used to filter the entire library for every rendered row.
+ * Building the groups once turns that per-row scan into a map lookup.
+ */
+export function useDupInfo(): DupInfo {
+  const tracks = useStore((s) => s.tracks);
+  return useMemo(() => {
+    const groups = new Map<string, Track[]>();
+    for (const t of tracks) {
+      if (!t.dupGroup) continue;
+      const g = groups.get(t.dupGroup);
+      if (g) g.push(t); else groups.set(t.dupGroup, [t]);
+    }
+    const better = new Map<string, Track>();
+    for (const g of groups.values()) {
+      // one pass to find the best, then point every worse member at it
+      let best = g[0];
+      for (const t of g) if (t.qualityScore > best.qualityScore) best = t;
+      for (const t of g) if (t !== best && best.qualityScore > t.qualityScore) better.set(t.id, best);
+    }
+    return { groups, better };
+  }, [tracks]);
+}

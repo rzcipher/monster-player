@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, Volume2, VolumeX, Music2, MicVocal, ListMusic, Timer } from "lucide-react";
 import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import { usePosition, useNow } from "../hooks";
 import { getWaveform } from "../lib/analysis";
 import { fmtTime, toCamelot } from "../lib/util";
@@ -60,14 +61,23 @@ export function Waveform({ height = 34, className = "" }: { height?: number; cla
 }
 
 export default function PlayerBar() {
-  const s = useStore();
-  const t = s.tracks.find((x) => x.id === s.currentId) || null;
+  const s = useTracked();
   const { pos, dur, transition } = usePosition(10);
   const now = useNow();
+  // `usePosition` re-renders this bar ~10x/s. Everything derived from the
+  // store below is unchanged between those ticks, so memoise it — otherwise
+  // each tick re-scanned the track list twice and recomputed the whole
+  // seeded shuffle inside computeNextId().
+  const tracks = s.tracks, currentId = s.currentId;
+  const t = useMemo(() => tracks.find((x) => x.id === currentId) || null, [tracks, currentId]);
   const RepeatIcon = s.repeat === "one" ? Repeat1 : Repeat;
   const sleepLeft = s.sleepEndsAt ? Math.max(0, Math.round((s.sleepEndsAt - now) / 60000)) : null;
-  const nextId = s.computeNextId();
-  const nextT = s.tracks.find((x) => x.id === nextId);
+  const queue = s.queue, shuffle = s.shuffle, seed = s.shuffleSeed, repeat = s.repeat, computeNextId = s.computeNextId;
+  const nextT = useMemo(() => {
+    const nid = computeNextId();
+    return nid ? tracks.find((x) => x.id === nid) : undefined;
+    // queue/shuffle/seed/repeat are the inputs computeNextId actually reads
+  }, [tracks, currentId, queue, shuffle, seed, repeat, computeNextId]);
   return (
     <div className="h-[var(--player-h)] shrink-0 border-t border-subtle themed-surface flex items-center gap-3 px-3 relative">
       {transition && <div className="absolute top-0 left-0 h-[2px] bg-accent2 transition-all" style={{ width: `${transition.progress * 100}%`, background: "var(--c-accent2)" }} title={`Crossfade (${transition.curve})`} />}

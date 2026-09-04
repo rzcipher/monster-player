@@ -220,34 +220,43 @@ export function matchesSmart(t: Track, rules: SmartRule[], mode: "all" | "any"):
 }
 
 // ---------- sorting ----------
-export function sortTracks(tracks: Track[], col: ColumnKey, dir: "asc" | "desc"): Track[] {
-  const m = dir === "asc" ? 1 : -1;
-  const val = (t: Track): string | number => {
-    switch (col) {
-      case "camelot": { const c = toCamelot(t.key || t.analyzedKey || ""); return c ? parseInt(c) * 2 + (c.endsWith("B") ? 1 : 0) : 99; }
-      case "quality": return t.qualityScore;
-      case "key": return t.key || t.analyzedKey || "";
-      case "bpm": return t.bpm ?? t.analyzedBpm ?? 0;
-      case "identity": return t.mbid || t.isrc || "";
-      case "index": return 0;
-      default: {
-        const v = (t as unknown as Record<string, unknown>)[col];
-        if (v === null || v === undefined) return dir === "asc" ? "\uffff" : "";
-        return typeof v === "number" ? v : String(v).toLowerCase();
-      }
+/**
+ * One shared collator for the whole app.
+ *
+ * `String.localeCompare(x, undefined, { numeric: true })` constructs a fresh
+ * Intl.Collator on *every call*. Inside a comparator that runs O(n log n)
+ * times this dominated the sort — seconds on a large library. Building it once
+ * and calling `.compare` is the same ordering for a fraction of the cost.
+ */
+const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "variant" });
+export const collate = (a: string, b: string) => COLLATOR.compare(a, b);
+
+/** Extract the sort key for one column. Exported so multi-key sorts reuse it. */
+function sortValue(t: Track, col: ColumnKey, dir: "asc" | "desc"): string | number {
+  switch (col) {
+    case "camelot": { const c = toCamelot(t.key || t.analyzedKey || ""); return c ? parseInt(c) * 2 + (c.endsWith("B") ? 1 : 0) : 99; }
+    case "quality": return t.qualityScore;
+    case "key": return t.key || t.analyzedKey || "";
+    case "bpm": return t.bpm ?? t.analyzedBpm ?? 0;
+    case "identity": return t.mbid || t.isrc || "";
+    case "index": return 0;
+    default: {
+      const v = (t as unknown as Record<string, unknown>)[col];
+      if (v === null || v === undefined) return dir === "asc" ? "\uffff" : "";
+      return typeof v === "number" ? v : String(v).toLowerCase();
     }
-  };
-  return tracks.slice().sort((a, b) => {
-    const va = val(a), vb = val(b);
-    if (va === vb) {
-      // stable-ish secondary: album, disc, track
-      if (a.album !== b.album) return a.album.localeCompare(b.album);
-      return ((a.discNo || 0) - (b.discNo || 0)) || ((a.trackNo || 0) - (b.trackNo || 0));
-    }
-    if (typeof va === "number" && typeof vb === "number") return (va - vb) * m;
-    return String(va).localeCompare(String(vb), undefined, { numeric: true }) * m;
-  });
+  }
 }
+
+function cmpValues(va: string | number, vb: string | number): number {
+  if (typeof va === "number" && typeof vb === "number") return va - vb;
+  return collate(String(va), String(vb));
+}
+
+export function sortTracks(tracks: Track[], col: ColumnKey, dir: "asc" | "desc"): Track[] {
+  return sortTracksMulti(tracks, [{ col, dir }]);
+}
+
 
 export const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 export const dbToGain = (db: number) => Math.pow(10, db / 20);
@@ -276,10 +285,39 @@ export const SORT_PRESETS: SortPreset[] = [
   { key: "genre", label: "Genre → artist → album", cols: [{ col: "genre", dir: "asc" }, { col: "albumArtist", dir: "asc" }, { col: "album", dir: "asc" }] },
 ];
 
-/** Multi-key stable sort used by the presets above. */
+/**
+ * Multi-key stable sort — single pass, decorate/sort/undecorate.
+ *
+ * This used to run one full sort per column (five passes for the album-order
+ * preset), recomputing every key each time. Now each track's keys are
+ * extracted exactly once into a tuple, the comparator walks the tuple, and a
+ * trailing original-index term keeps the sort stable without extra passes.
+ */
 export function sortTracksMulti(tracks: Track[], cols: { col: ColumnKey; dir: "asc" | "desc" }[]): Track[] {
-  let out = tracks.slice();
-  // apply least-significant key first so the sort stays stable overall
-  for (let i = cols.length - 1; i >= 0; i--) out = sortTracks(out, cols[i].col, cols[i].dir);
-  return out;
+  if (!cols.length) return tracks.slice();
+  const dirs = cols.map((c) => (c.dir === "asc" ? 1 : -1));
+
+  // decorate: keys computed once per track, not once per comparison
+  const decorated = tracks.map((t, i) => ({
+    t, i,
+    keys: cols.map((c) => sortValue(t, c.col, c.dir)),
+    album: t.album,
+    disc: t.discNo || 0,
+    no: t.trackNo || 0,
+  }));
+
+  decorated.sort((a, b) => {
+    for (let k = 0; k < a.keys.length; k++) {
+      const d = cmpValues(a.keys[k], b.keys[k]);
+      if (d !== 0) return d * dirs[k];
+    }
+    // same on every requested key: fall back to natural album order …
+    if (a.album !== b.album) return collate(a.album, b.album);
+    if (a.disc !== b.disc) return a.disc - b.disc;
+    if (a.no !== b.no) return a.no - b.no;
+    // … then original position, which makes the whole sort stable
+    return a.i - b.i;
+  });
+
+  return decorated.map((d) => d.t);
 }

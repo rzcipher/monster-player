@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, Volume2, ChevronDown, ChevronUp, PanelTopClose, MicVocal, Pin, PinOff, EyeOff, Eye, Sliders } from "lucide-react";
 import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import { usePosition, useSpectrum } from "../hooks";
 import { fmtTime, toCamelot } from "../lib/util";
 import { Cover, QualityBadge } from "./ui";
@@ -29,7 +30,7 @@ function MiniSpectrum() {
  * expand handle that drops the whole library below the strip.
  */
 export default function DockBar() {
-  const s = useStore();
+  const s = useTracked();
   const t = s.tracks.find((x) => x.id === s.currentId) || null;
   const { pos, dur } = usePosition(10);
   const RepeatIcon = s.repeat === "one" ? Repeat1 : Repeat;

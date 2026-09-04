@@ -25,6 +25,10 @@ const HIDE_DELAY = 700;      // grace period before hiding again
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "saltbee-art", privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+  // `stream: true` is what lets <audio> issue Range requests against this
+  // scheme. Without it Chromium buffers the whole response before playing,
+  // which would defeat the point of streaming off disk.
+  { scheme: "saltbee-file", privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
 ]);
 
 const isWin = process.platform === "win32";
@@ -495,6 +499,50 @@ else {
       if (id.endsWith(".full") && !fs.existsSync(file)) file = file.slice(0, -5);
       if (!fs.existsSync(file)) return new Response(null, { status: 404 });
       return net.fetch(pathToFileURL(file).toString());
+    });
+
+    /**
+     * Stream audio files to the renderer's <audio> element.
+     *
+     * The renderer used to read whole files over IPC and hand them to
+     * decodeAudioData, which meant a full float32 PCM copy in the JS heap
+     * (~85 MB for a 4-minute track). Serving the file over a real URL lets
+     * Chromium's media stack demux and decode it incrementally, in native
+     * memory, and throw away what it has already played.
+     *
+     * net.fetch on a file:// URL already honours the Range header, so seeking
+     * works without us implementing byte ranges by hand.
+     */
+    protocol.handle("saltbee-file", (req) => {
+      let target;
+      try {
+        const u = new URL(req.url);
+        // The path is percent-encoded by the renderer (encodeURIComponent),
+        // so a Windows path like C:\Music\a.flac survives intact.
+        target = decodeURIComponent(u.searchParams.get("p") || "");
+      } catch { return new Response(null, { status: 400 }); }
+      if (!target) return new Response(null, { status: 400 });
+      // Only serve real audio files that the library could plausibly own.
+      if (!AUDIO_EXT.has(path.extname(target).toLowerCase())) return new Response(null, { status: 403 });
+      if (!fs.existsSync(target)) return new Response(null, { status: 404 });
+      return net.fetch(pathToFileURL(target).toString(), { headers: req.headers, bypassCustomProtocolHandlers: true })
+        .then((res) => {
+          /*
+           * CORS matters here even though everything is local.
+           *
+           * saltbee-file:// is a different origin from the app, so without an
+           * explicit allow header the <audio> element is treated as
+           * cross-origin. A MediaElementAudioSourceNode built on tainted media
+           * silently outputs ZEROES — playback would look fine (position
+           * advances, no error) but you'd hear nothing. These headers keep the
+           * stream same-origin-equivalent so the Web Audio graph gets real
+           * samples.
+           */
+          const h = new Headers(res.headers);
+          h.set("Access-Control-Allow-Origin", "*");
+          h.set("Accept-Ranges", "bytes");
+          return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+        });
     });
     const n = library.loadIndex();
     if (n) console.log(`[SaltBee] library index loaded: ${n} tracks`);

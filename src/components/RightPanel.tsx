@@ -1,16 +1,32 @@
 import { useMemo } from "react";
+import { useVirtual } from "../hooks/useVirtual";
+import { useTrackById } from "../lib/selectors";
 import { X, Trash2, Dice5, ListMusic, Radio, Sparkles } from "lucide-react";
-import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import { fmtTime, fmtSize, toCamelot, seededShuffle } from "../lib/util";
 import { Stars } from "./ui";
 import type { Track } from "../types";
 
+const CURVE_POINTS = 160;
+
 function EnergyCurve({ tracks, currentId }: { tracks: Track[]; currentId: string | null }) {
   if (tracks.length < 2) return null;
-  const e = tracks.map((t) => t.energy ?? Math.min(1, ((t.bpm ?? t.analyzedBpm ?? 100) - 60) / 120));
+  // The queue is often the entire library. One SVG point per track would emit
+  // tens of thousands of coordinates into the DOM for a 100px-wide sparkline,
+  // so bucket the queue down to a fixed number of points.
+  const stride = Math.max(1, Math.ceil(tracks.length / CURVE_POINTS));
+  const energyOf = (t: Track) => t.energy ?? Math.min(1, ((t.bpm ?? t.analyzedBpm ?? 100) - 60) / 120);
+  const e: number[] = [];
+  for (let i = 0; i < tracks.length; i += stride) {
+    let sum = 0, n = 0;
+    for (let j = i; j < Math.min(i + stride, tracks.length); j++) { sum += energyOf(tracks[j]); n++; }
+    e.push(sum / n);
+  }
+  if (e.length < 2) return null;
   const W = 100, H = 30;
   const pts = e.map((v, i) => `${(i / (e.length - 1)) * W},${H - 2 - v * (H - 4)}`).join(" ");
-  const ci = tracks.findIndex((t) => t.id === currentId);
+  const rawCi = tracks.findIndex((t) => t.id === currentId);
+  const ci = rawCi < 0 ? -1 : Math.min(e.length - 1, Math.floor(rawCi / stride));
   return (
     <div className="px-3 pt-2">
       <div className="flex justify-between text-[10px] text-muted mb-1"><span className="inline-flex items-center gap-1"><Sparkles size={10} /> Energy curve</span><span>{tracks.length} tracks</span></div>
@@ -25,18 +41,41 @@ function EnergyCurve({ tracks, currentId }: { tracks: Track[]; currentId: string
 }
 
 export default function RightPanel() {
-  const s = useStore();
+  const s = useTracked();
+  const byId = useTrackById();
   const order = useMemo(() => (s.shuffle ? seededShuffle(s.queue, s.shuffleSeed) : s.queue), [s.queue, s.shuffle, s.shuffleSeed]);
-  const tracks = useMemo(() => order.map((id) => s.tracks.find((t) => t.id === id)!).filter(Boolean), [order, s.tracks]);
+  // Map lookup instead of `tracks.find` per queued id: the queue is often the
+  // whole library, which made this O(n²) on every render.
+  const tracks = useMemo(() => order.map((id) => byId.get(id)!).filter(Boolean), [order, byId]);
+
+  /**
+   * Flatten groups + tracks into one row list so the panel can be virtualised.
+   * The queue is open by default and usually holds the entire library, so
+   * rendering every row (two lines and a star widget each) was one of the
+   * largest permanent DOM costs in the app.
+   */
+  const rows = useMemo(() => {
+    const out: ({ kind: "head"; key: string; title: string; count: number; dur: number } | { kind: "track"; t: Track; i: number })[] = [];
+    let curKey: string | null = null;
+    let head: { kind: "head"; key: string; title: string; count: number; dur: number } | null = null;
+    tracks.forEach((t, i) => {
+      const key = `${t.year ?? ""}::${t.album}`;
+      if (key !== curKey) {
+        curKey = key;
+        head = { kind: "head", key: key + ":" + i, title: `${t.year ?? "—"} - ${t.album || "Unknown"}`, count: 0, dur: 0 };
+        out.push(head);
+      }
+      head!.count++; head!.dur += t.duration;
+      out.push({ kind: "track", t, i });
+    });
+    return out;
+  }, [tracks]);
+
+  const QUEUE_ROW_H = 44;
+  const v = useVirtual(rows.length, QUEUE_ROW_H);
   const tab = s.rightPanel;
+  const totalDur = useMemo(() => tracks.reduce((a, t) => a + t.duration, 0), [tracks]);
   if (tab === "none") return null;
-  const groups: { key: string; title: string; tracks: { t: Track; i: number }[] }[] = [];
-  tracks.forEach((t, i) => {
-    const key = `${t.year ?? ""}::${t.album}`;
-    const g = groups[groups.length - 1];
-    if (g && g.key === key) g.tracks.push({ t, i }); else groups.push({ key, title: `${t.year ?? "—"} - ${t.album || "Unknown"}`, tracks: [{ t, i }] });
-  });
-  const totalDur = tracks.reduce((a, t) => a + t.duration, 0);
   return (
     <aside className="w-[340px] shrink-0 border-l border-subtle themed-bg flex flex-col">
       <div className="flex items-center gap-1 p-2 border-b border-subtle">
@@ -59,29 +98,31 @@ export default function RightPanel() {
             </span>
             <button onClick={s.clearQueue} title="Clear queue" className="hover:text-white"><Trash2 size={12} /></button>
           </div>
-          <div className="flex-1 overflow-y-auto">
-            {groups.map((g) => (
-              <div key={g.key + g.tracks[0].i} className="px-3 pt-3">
-                <div className="flex items-center justify-between text-[13px] mb-1">
-                  <span className="flex items-center gap-2"><span className="w-1.5 h-1.5 rounded-full accent-bg" />{g.title}</span>
-                  <span className="text-muted text-[11px]">{g.tracks.length} / {fmtTime(g.tracks.reduce((a, x) => a + x.t.duration, 0))}</span>
+          <div className="flex-1 overflow-y-auto" ref={v.scrollRef}>
+            {v.padTop > 0 && <div style={{ height: v.padTop }} aria-hidden />}
+            {rows.slice(v.start, v.end).map((row) => (
+              row.kind === "head" ? (
+                <div key={"h:" + row.key} className="px-3 flex items-center justify-between text-[13px]" style={{ height: QUEUE_ROW_H }}>
+                  <span className="flex items-center gap-2 truncate"><span className="w-1.5 h-1.5 rounded-full accent-bg shrink-0" />{row.title}</span>
+                  <span className="text-muted text-[11px] shrink-0">{row.count} / {fmtTime(row.dur)}</span>
                 </div>
-                {g.tracks.map(({ t, i }) => (
-                  <div key={t.id + i} onDoubleClick={() => s.playTrack(t.id)} onContextMenu={(e) => { e.preventDefault(); s.removeFromQueue(s.queue.indexOf(t.id)); }}
-                    className={`pl-4 pr-1 py-1.5 rounded hover-row cursor-default ${s.currentId === t.id ? "row-playing" : ""}`}>
-                    <div className="flex items-center gap-2 text-[12px]">
-                      <span className="w-1 h-1 rounded-full bg-current opacity-50" />
-                      <span className="truncate flex-1">{i + 1}. {t.artist} - {t.title}</span>
-                      <span className="text-muted text-[11px]">{fmtTime(t.duration)}</span>
-                    </div>
-                    <div className="flex items-center justify-between pl-3 text-[10px] text-muted">
-                      <span>{t.codec} :: {Math.round(t.sampleRate / 1000)} kHz, {t.bitrate} kbps, {fmtSize(t.fileSize)}{(t.key || t.analyzedKey) ? ` · ${toCamelot(t.key || t.analyzedKey || "")}` : ""}</span>
-                      <Stars value={t.rating} size={8} onChange={(v) => s.setRating(t.id, v)} />
-                    </div>
+              ) : (
+                <div key={row.t.id + ":" + row.i} onDoubleClick={() => s.playTrack(row.t.id)} onContextMenu={(e) => { e.preventDefault(); s.removeFromQueue(s.queue.indexOf(row.t.id)); }}
+                  style={{ height: QUEUE_ROW_H }}
+                  className={`px-3 pl-4 rounded hover-row cursor-default flex flex-col justify-center ${s.currentId === row.t.id ? "row-playing" : ""}`}>
+                  <div className="flex items-center gap-2 text-[12px]">
+                    <span className="w-1 h-1 rounded-full bg-current opacity-50 shrink-0" />
+                    <span className="truncate flex-1">{row.i + 1}. {row.t.artist} - {row.t.title}</span>
+                    <span className="text-muted text-[11px] shrink-0">{fmtTime(row.t.duration)}</span>
                   </div>
-                ))}
-              </div>
+                  <div className="flex items-center justify-between pl-3 text-[10px] text-muted">
+                    <span className="truncate">{row.t.codec} :: {Math.round(row.t.sampleRate / 1000)} kHz, {row.t.bitrate} kbps, {fmtSize(row.t.fileSize)}{(row.t.key || row.t.analyzedKey) ? ` · ${toCamelot(row.t.key || row.t.analyzedKey || "")}` : ""}</span>
+                    <Stars value={row.t.rating} size={8} onChange={(val) => s.setRating(row.t.id, val)} />
+                  </div>
+                </div>
+              )
             ))}
+            {v.padBottom > 0 && <div style={{ height: v.padBottom }} aria-hidden />}
             {!tracks.length && <div className="p-6 text-center text-muted text-[12px]">Queue is empty. Double-click a track or right-click → Play next.</div>}
           </div>
         </>

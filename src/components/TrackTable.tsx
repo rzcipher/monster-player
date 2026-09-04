@@ -1,8 +1,9 @@
 import { Fragment, useState, useCallback, useMemo, type ReactNode } from "react";
 import { ChevronUp, ChevronDown, ChevronRight, Play, ListPlus, ListEnd, Tag, FileText, Activity, Wand2, Languages, Mic2, ExternalLink, ArrowUpCircle, Trash2, ShieldCheck, LayoutGrid, Table2, Columns3, Sparkles, Users, Group, FolderOpen, ArrowDownWideNarrow } from "lucide-react";
 import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import { useShallow } from "zustand/react/shallow";
-import { useVisibleTracks, bestSibling } from "../lib/selectors";
+import { useVisibleTracks, useDupInfo } from "../lib/selectors";
 import { fmtTime, fmtLong, fmtSize, toCamelot } from "../lib/util";
 import type { ColumnKey, Track } from "../types";
 import { QualityBadge, CamelotChip, Stars, TrimKnob, ContextMenu, Cover, type MenuItem } from "./ui";
@@ -22,9 +23,10 @@ const COLS: { key: ColumnKey; label: string; w: number; align?: "right" | "cente
 ];
 
 export function useTrackMenu() {
-  const s = useStore();
+  const s = useTracked();
+  const dup = useDupInfo();
   return useCallback((t: Track, ids: string[]): MenuItem[] => {
-    const sib = bestSibling(t, s.tracks);
+    const sib = dup.better.get(t.id) || null;
     const mbUrl = t.mbid ? `https://musicbrainz.org/recording/${t.mbid}` : t.isrc ? `https://musicbrainz.org/isrc/${t.isrc}` : `https://musicbrainz.org/search?query=${encodeURIComponent(t.artist + " " + t.title)}&type=recording`;
     return [
       { label: "Play", icon: <Play size={13} />, onClick: () => s.playTrack(t.id) },
@@ -55,7 +57,7 @@ export function useTrackMenu() {
 }
 
 export function Toolbar({ list }: { list: Track[] }) {
-  const s = useStore();
+  const s = useTracked();
   const [colsOpen, setColsOpen] = useState(false);
   const total = list.reduce((a, t) => a + t.duration, 0), size = list.reduce((a, t) => a + t.fileSize, 0);
   const f = s.filter;
@@ -128,6 +130,7 @@ export default function TrackTable() {
     })),
   );
   const list = useVisibleTracks();
+  const dup = useDupInfo();
   const menu = useTrackMenu();
   const [ctx, setCtx] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [anchor, setAnchor] = useState<string | null>(null);
@@ -166,7 +169,7 @@ export default function TrackTable() {
       case "camelot": return <CamelotChip t={t} />;
       case "advisory": return t.advisory === "none" ? <span className="text-muted">—</span> : <span className={`badge ${t.advisory === "explicit" ? "bg-red-500/20 text-red-300" : "bg-emerald-500/20 text-emerald-300"}`}>{t.advisory}</span>;
       case "quality": {
-        const sib = bestSibling(t, s.tracks);
+        const sib = dup.better.get(t.id) || null;
         return (
           <span className="flex items-center gap-1.5 min-w-0">
             <QualityBadge t={t} />
@@ -256,7 +259,7 @@ export default function TrackTable() {
               const t = row.track!;
               const prev = rows[i - 1]?.track;
               const groupHead = groupsInQuarantine && t.dupGroup && (!prev || prev.dupGroup !== t.dupGroup);
-              const groupSize = groupsInQuarantine ? s.tracks.filter((x) => x.dupGroup === t.dupGroup).length : 0;
+              const groupSize = groupsInQuarantine && t.dupGroup ? (dup.groups.get(t.dupGroup)?.length ?? 0) : 0;
               return (
                 <Fragment key={t.id}>
                   {groupHead && (

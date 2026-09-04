@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { useStore, getEngine } from "./store";
+import { useTracked } from "./lib/tracked";
 import TitleBar from "./components/TitleBar";
 import Sidebar from "./components/Sidebar";
 import TrackTable from "./components/TrackTable";
@@ -15,7 +16,11 @@ import SoundEffects from "./components/SoundEffects";
 import DockBar from "./components/DockBar";
 import { TagEditor, SmartEditor, SettingsDialog, QuarantineDialog, SleepDialog, PromptDialog } from "./components/Dialogs";
 
-function MainArea() {
+/**
+ * Memoised so that store writes which don't change `view` (status text, resume
+ * position, scan ticks) can't force the sidebar + table + panel to re-render.
+ */
+const MainArea = memo(function MainArea() {
   const view = useStore((s) => s.view);
   return (
     <div className="flex-1 flex min-h-0">
@@ -29,10 +34,24 @@ function MainArea() {
       <RightPanel />
     </div>
   );
+});
+
+/**
+ * Scan progress ticks several times a second. Kept in its own component with a
+ * narrow subscription so those ticks repaint this pill and nothing else.
+ */
+function ScanProgress() {
+  const scan = useStore((s) => s.scan);
+  if (!scan.active) return null;
+  return (
+    <div className="fixed bottom-[calc(var(--player-h)+8px)] left-1/2 -translate-x-1/2 z-[90] glass border border-subtle rounded-full px-4 py-1.5 text-[12px] flex items-center gap-3">
+      <span className="w-2 h-2 rounded-full accent-bg pulse-dot" />Scanning {scan.done}/{scan.total || "…"} <span className="text-muted truncate max-w-[300px]">{scan.current}</span>
+    </div>
+  );
 }
 
 export default function App() {
-  const s = useStore();
+  const s = useTracked();
   const [dragging, setDragging] = useState(false);
   useDesktopLyrics();
 
@@ -171,11 +190,7 @@ export default function App() {
           </div>
         </div>
       )}
-      {s.scan.active && (
-        <div className="fixed bottom-[calc(var(--player-h)+8px)] left-1/2 -translate-x-1/2 z-[90] glass border border-subtle rounded-full px-4 py-1.5 text-[12px] flex items-center gap-3">
-          <span className="w-2 h-2 rounded-full accent-bg pulse-dot" />Scanning {s.scan.done}/{s.scan.total || "…"} <span className="text-muted truncate max-w-[300px]">{s.scan.current}</span>
-        </div>
-      )}
+      <ScanProgress />
     </div>
   );
 }

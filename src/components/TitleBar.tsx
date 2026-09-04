@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Search, Minus, Square, X, PanelTop, Sliders, Settings2, FolderOpen, FileAudio, RefreshCw, Shuffle, Repeat, Timer, Music2, ShieldAlert, Activity, LayoutGrid, Table2, Disc3, Users, Group, Palette } from "lucide-react";
-import { useStore } from "../store";
+import { useTracked } from "../lib/tracked";
 import type { MenuItem } from "./ui";
 import { native } from "../lib/native";
 import { GROUP_OPTIONS } from "../lib/grouping";
@@ -26,7 +26,7 @@ function Menu({ label, items }: { label: string; items: MenuItem[] }) {
 }
 
 export default function TitleBar() {
-  const s = useStore();
+  const s = useTracked();
   const openFiles = async (disk: boolean) => {
     if (native) { const paths = await native.pickFiles(); if (paths.length) s.importNativePaths(paths, disk); return; }
     const inp = document.createElement("input"); inp.type = "file"; inp.multiple = true; inp.accept = "audio/*,.flac,.m4a,.alac,.mp3,.ogg,.opus,.wav,.aiff,.aif,.dsf,.dff,.ape,.wv,.cue";

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Tag, Sparkles, Settings2, ShieldAlert, Timer, Music, Disc3, Plus, Trash2 } from "lucide-react";
 import { useStore, getEngine } from "../store";
+import { useTracked } from "../lib/tracked";
 import { coverStats } from "../lib/covers";
 import { Modal, Toggle, Slider, QualityBadge } from "./ui";
 import { native } from "../lib/native";
@@ -20,7 +21,7 @@ function Field({ label, value, onChange, icon, type = "text", className = "" }: 
 }
 
 export function TagEditor() {
-  const s = useStore();
+  const s = useTracked();
   const t = s.tracks.find((x) => x.id === s.tagEditorId);
   const [draft, setDraft] = useState<Partial<Track>>(() => (t ? { ...t } : {}));
   if (!t) return null;
@@ -77,7 +78,7 @@ const FIELDS: { v: SmartRule["field"]; l: string }[] = [
 const OPS: { v: SmartRule["op"]; l: string }[] = [{ v: "contains", l: "contains" }, { v: "is", l: "is" }, { v: "isnot", l: "is not" }, { v: "startsWith", l: "starts with" }, { v: "gt", l: ">" }, { v: "lt", l: "<" }, { v: "camelot±1", l: "within ±1 Camelot of" }];
 
 export function SmartEditor() {
-  const s = useStore();
+  const s = useTracked();
   const p = s.playlists.find((x) => x.id === s.smartEditorId);
   const [rules, setRules] = useState<SmartRule[]>(p?.smart || []);
   const [match, setMatch] = useState<"all" | "any">(p?.smartMatch || "all");
@@ -142,7 +143,7 @@ function MemoryReadout() {
 }
 
 export function SettingsDialog() {
-  const s = useStore();
+  const s = useTracked();
   const st = s.settings;
   return (
     <Modal title={<><Settings2 size={18} className="accent-text" /> Settings</>} onClose={() => s.set({ settingsOpen: false })} width={640}>
@@ -151,6 +152,11 @@ export function SettingsDialog() {
           <div className="label mb-2">Playback engine</div>
           <div className="space-y-2">
             <Toggle checked={st.matchSourceRate} onChange={(v) => s.setSetting("matchSourceRate", v)} label="Bit-perfect: re-clock output to the source sample rate (no resampling in the engine)" />
+            <Toggle checked={st.precisionEngine} onChange={(v) => s.setSetting("precisionEngine", v)} label="Precision engine: decode each track fully instead of streaming" />
+            <div className="text-[11px] text-muted -mt-1 pl-1 leading-relaxed">
+              Streaming (default) hands playback to the media pipeline and uses a few MB per track. Precision decodes the whole
+              file to PCM — roughly 85 MB for a 4-minute track — and is only needed for independent pitch shift and silent-edge trimming.
+            </div>
             <Toggle checked={st.resumeOnStart} onChange={(v) => s.setSetting("resumeOnStart", v)} label="Resume last track & position on start" />
             <Toggle checked={st.autoAnalyze} onChange={(v) => s.setSetting("autoAnalyze", v)} label="Analyze loudness / key / BPM in the background after import" />
             <div className="flex items-center gap-2">Output device
@@ -263,7 +269,7 @@ export function SettingsDialog() {
 }
 
 export function QuarantineDialog() {
-  const s = useStore();
+  const s = useTracked();
   const groups = new Map<string, Track[]>();
   for (const t of s.tracks) if (t.dupGroup) (groups.get(t.dupGroup) || groups.set(t.dupGroup, []).get(t.dupGroup)!).push(t);
   return (
@@ -295,7 +301,7 @@ export function QuarantineDialog() {
 }
 
 export function SleepDialog() {
-  const s = useStore();
+  const s = useTracked();
   const [custom, setCustom] = useState(45);
   return (
     <Modal title={<><Timer size={18} className="accent-text" /> Sleep timer</>} onClose={() => s.set({ sleepOpen: false })} width={420}>

@@ -21,19 +21,50 @@ async function readTrackBytes(track: Track): Promise<ArrayBuffer> {
 
 export const EQ_BANDS = [31, 63, 87, 125, 175, 250, 350, 500, 700, 1000, 1400, 2000, 2800, 4000, 5600, 8000, 11200, 16000];
 
-interface Deck {
+/**
+ * A deck is one playing (or ready-to-play) track feeding its own fade +
+ * trackGain pair into the shared DSP input.
+ *
+ * Two kinds:
+ *  - "stream" (default for real files): an <audio> element behind a
+ *    MediaElementAudioSourceNode. Chromium demuxes and decodes incrementally
+ *    in native memory, so a 4-minute track costs a few MB instead of the
+ *    ~85 MB a full float32 AudioBuffer needs.
+ *  - "pcm": the original AudioBufferSourceNode path. Still used for generated
+ *    demo tracks (there is no file to stream) and for the optional Precision
+ *    engine, which needs a real buffer for detune-based pitch shift and for
+ *    silence trimming.
+ *
+ * Everything downstream — EQ, effects, crossfade curves, gapless handoff —
+ * only touches `fade`/`trackGain`, so it works identically for both.
+ */
+interface DeckBase {
   track: Track;
-  buffer: AudioBuffer;
-  src: AudioBufferSourceNode | null;
   fade: GainNode;
   trackGain: GainNode; // replaygain + trim + peak norm
-  startCtx: number; // ctx time when src started
-  offset: number; // buffer-seconds position at startCtx (absolute within buffer)
-  start: number; // effective start in buffer (cue/silence)
-  end: number; // effective end in buffer
+  start: number; // effective start in seconds (cue/silence)
+  end: number; // effective end in seconds
   rate: number;
   ended: boolean;
+  /** set once the deck has been handed to startDeck and is sounding */
+  started: boolean;
 }
+interface PcmDeck extends DeckBase {
+  kind: "pcm";
+  buffer: AudioBuffer;
+  src: AudioBufferSourceNode | null;
+  startCtx: number; // ctx time when src started
+  offset: number; // buffer-seconds position at startCtx
+}
+interface StreamDeck extends DeckBase {
+  kind: "stream";
+  el: HTMLAudioElement;
+  node: MediaElementAudioSourceNode;
+  /** pending start time (ctx clock) while we wait for the element to be ready */
+  scheduled: number | null;
+  timer: number | null;
+}
+type Deck = PcmDeck | StreamDeck;
 
 export interface Transition { active: boolean; progress: number; from: string; to: string; curve: CurveType; seconds: number }
 
@@ -68,6 +99,7 @@ export class AudioEngine {
   private fxSum!: GainNode;
   private echoDelay!: DelayNode; private echoFb!: GainNode; private echoWet!: GainNode;
   private reverb!: ConvolverNode; private reverbWet!: GainNode;
+  private reverbEqOut: AudioNode | null = null; private reverbLive = false;
   private flDelay!: DelayNode; private flWet!: GainNode; private flLfo!: OscillatorNode; private flDepth!: GainNode;
   private chDelay!: DelayNode; private chWet!: GainNode; private chLfo!: OscillatorNode; private chDepth!: GainNode;
   private wLL!: GainNode; private wLR!: GainNode; private wRL!: GainNode; private wRR!: GainNode;
@@ -110,6 +142,16 @@ export class AudioEngine {
   get cacheSize() { return this.cacheBytes; }
   outputInfo = { sampleRate: 0, latency: 0, sink: "default" };
   matchSourceRate = false;
+  /**
+   * Precision engine: force the full-PCM path for every track.
+   *
+   * Streaming is the default because it costs a few MB instead of ~85 MB per
+   * track, but an <audio> element can't do independent pitch shift (detune)
+   * or let us scan for silent edges, so those features need real buffers.
+   */
+  precision = false;
+  /** object URLs created for browser-dev streaming, revoked on release */
+  private objectUrls = new Map<string, string>();
 
   constructor(dsp: DspState) {
     this.dsp = dsp;
@@ -139,7 +181,7 @@ export class AudioEngine {
     // fx
     this.fxSum = c.createGain();
     this.echoDelay = c.createDelay(2); this.echoDelay.delayTime.value = 0.32; this.echoFb = c.createGain(); this.echoFb.gain.value = 0.42; this.echoWet = c.createGain();
-    this.reverb = c.createConvolver(); this.reverb.buffer = this.makeImpulse(2.2, 2.6); this.reverbWet = c.createGain();
+    this.reverb = c.createConvolver(); this.reverbWet = c.createGain();
     this.flDelay = c.createDelay(0.05); this.flDelay.delayTime.value = 0.004; this.flWet = c.createGain();
     this.flLfo = c.createOscillator(); this.flLfo.frequency.value = 0.3; this.flDepth = c.createGain(); this.flDepth.gain.value = 0.0025;
     this.flLfo.connect(this.flDepth).connect(this.flDelay.delayTime); this.flLfo.start();
@@ -166,7 +208,11 @@ export class AudioEngine {
     const eqOut = node;
     eqOut.connect(this.fxSum);
     eqOut.connect(this.echoDelay); this.echoDelay.connect(this.echoFb); this.echoFb.connect(this.echoDelay); this.echoDelay.connect(this.echoWet); this.echoWet.connect(this.fxSum);
-    eqOut.connect(this.reverb); this.reverb.connect(this.reverbWet); this.reverbWet.connect(this.fxSum);
+    // The convolver is NOT connected here. A 2.2s stereo impulse response
+    // convolves every sample continuously — real CPU burnt even at 0% wet.
+    // It is attached on demand by setReverbActive() and detached when silent.
+    this.reverbEqOut = eqOut; this.reverbLive = false;
+    this.reverbWet.connect(this.fxSum);
     eqOut.connect(this.flDelay); this.flDelay.connect(this.flWet); this.flWet.connect(this.fxSum);
     eqOut.connect(this.chDelay); this.chDelay.connect(this.chWet); this.chWet.connect(this.fxSum);
     this.fxSum.connect(wsp);
@@ -189,6 +235,25 @@ export class AudioEngine {
     if (!this.dspEnabled) { this.input.connect(this.preamp); return; }
     if (this.voiceOn) { this.input.connect(this.vrIn); this.vrOut.connect(this.bass); }
     else this.input.connect(this.bass);
+  }
+
+  /**
+   * Attach/detach the reverb convolver.
+   *
+   * Building the impulse response is deferred to the first time reverb is
+   * actually turned on, and the node is disconnected entirely when the wet
+   * level returns to zero so it stops consuming CPU while idle.
+   */
+  private setReverbActive(on: boolean) {
+    if (on === this.reverbLive || !this.reverbEqOut) return;
+    if (on) {
+      if (!this.reverb.buffer) this.reverb.buffer = this.makeImpulse(2.2, 2.6);
+      try { this.reverbEqOut.connect(this.reverb); this.reverb.connect(this.reverbWet); } catch { /* */ }
+    } else {
+      try { this.reverbEqOut.disconnect(this.reverb); } catch { /* */ }
+      try { this.reverb.disconnect(); } catch { /* */ }
+    }
+    this.reverbLive = on;
   }
 
   private makeImpulse(seconds: number, decay: number): AudioBuffer {
@@ -229,6 +294,7 @@ export class AudioEngine {
     this.eqPre.gain.setTargetAtTime(d.eqOn ? dbToGain(d.eqPreamp) : 1, t, k);
     this.eq.forEach((b, i) => b.gain.setTargetAtTime(d.eqOn ? d.eq[i] : 0, t, k));
     this.echoWet.gain.setTargetAtTime(d.echo * 0.8, t, k);
+    this.setReverbActive(d.reverb > 0.001);
     this.reverbWet.gain.setTargetAtTime(d.reverb * 0.9, t, k);
     this.flWet.gain.setTargetAtTime(d.flanger * 0.9, t, k);
     this.chWet.gain.setTargetAtTime(d.chorus * 0.8, t, k);
@@ -279,12 +345,17 @@ export class AudioEngine {
   private applyRate() {
     const rate = clamp(this.dsp.speed * this.dsp.tempo, 0.25, 4);
     for (const d of [this.current, this.next]) {
-      if (!d?.src) continue;
-      // re-anchor position before changing rate
-      const pos = this.deckPos(d);
-      d.offset = pos; d.startCtx = this.ctx.currentTime; d.rate = rate;
-      d.src.playbackRate.setValueAtTime(rate, this.ctx.currentTime);
-      d.src.detune.setValueAtTime(this.dsp.pitch * 100, this.ctx.currentTime);
+      if (!d || !this.deckLive(d)) continue;
+      if (d.kind === "pcm") {
+        // re-anchor position before changing rate
+        const pos = this.deckPos(d);
+        d.offset = pos; d.startCtx = this.ctx.currentTime; d.rate = rate;
+        d.src!.playbackRate.setValueAtTime(rate, this.ctx.currentTime);
+        d.src!.detune.setValueAtTime(this.dsp.pitch * 100, this.ctx.currentTime);
+      } else {
+        d.rate = rate;
+        d.el.playbackRate = rate;
+      }
     }
   }
 
@@ -320,7 +391,9 @@ export class AudioEngine {
     for (const [k, b] of this.bufferCache) {
       if (this.cacheBytes <= AudioEngine.CACHE_BUDGET) break;
       // keep anything currently loaded into a deck
-      if (b === this.current?.buffer || b === this.next?.buffer) continue;
+      const curBuf = this.current?.kind === "pcm" ? this.current.buffer : null;
+      const nextBuf = this.next?.kind === "pcm" ? this.next.buffer : null;
+      if (b === curBuf || b === nextBuf) continue;
       this.bufferCache.delete(k);
       this.cacheBytes -= AudioEngine.bufBytes(b);
     }
@@ -335,68 +408,184 @@ export class AudioEngine {
     if (cached) return cached;
     if (track.source === "demo") return renderDemoTrack(track, this.ctx.sampleRate);
     const ab = await readTrackBytes(track);
-    // decodeAudioData detaches the ArrayBuffer, so the compressed copy is freed for us
-    return this.ctx.decodeAudioData(ab);
+    // Decode into a throwaway 22.05 kHz mono-ish context rather than the live
+    // one. Loudness/BPM/key analysis does not need 44.1 kHz stereo, and at a
+    // quarter of the sample rate the PCM we hold while analysing is a quarter
+    // the size. The context is discarded immediately, so nothing accumulates.
+    const ANALYSIS_SR = 22050;
+    try {
+      const oc = new OfflineAudioContext(1, 1, ANALYSIS_SR);
+      // decodeAudioData detaches the ArrayBuffer, so the compressed copy is freed for us
+      return await oc.decodeAudioData(ab);
+    } catch {
+      // Some builds refuse odd sample rates for a given codec — fall back.
+      return this.ctx.decodeAudioData(ab);
+    }
   }
 
   /** Release all cached PCM (called on stop / library changes / memory pressure). */
   releaseCache() {
     this.bufferCache.clear();
     this.cacheBytes = 0;
+    for (const u of this.objectUrls.values()) { try { URL.revokeObjectURL(u); } catch { /* */ } }
+    this.objectUrls.clear();
+  }
+
+  /** True when this track should stream rather than be decoded to PCM. */
+  private shouldStream(track: Track): boolean {
+    if (this.precision) return false;          // Precision engine = always PCM
+    if (track.source === "demo") return false; // generated, no file to stream
+    if (this.dsp.pitch !== 0) return false;    // detune needs a buffer source
+    if (this.dsp.removeSilence && this.dsp.silenceEdges) return false; // needs PCM to find edges
+    return !!this.streamUrl(track);
+  }
+
+  /** A URL an <audio> element can stream from, or null if we must decode. */
+  private streamUrl(track: Track): string | null {
+    if (track.source !== "file") return null;
+    if (native && track.path) return `saltbee-file://audio/?p=${encodeURIComponent(track.path)}`;
+    // Browser dev mode: fall back to an object URL over the File handle.
+    if (track.file) {
+      let u = this.objectUrls.get(track.id);
+      if (!u) { u = URL.createObjectURL(track.file); this.objectUrls.set(track.id, u); }
+      return u;
+    }
+    return null;
   }
 
   private async makeDeck(track: Track): Promise<Deck> {
-    const buffer = await this.decode(track);
     const fade = this.ctx.createGain(); const trackGain = this.ctx.createGain();
     fade.connect(trackGain); trackGain.connect(this.input);
+
+    if (this.shouldStream(track)) {
+      const url = this.streamUrl(track)!;
+      const el = new Audio();
+      el.preload = "auto";
+      el.crossOrigin = "anonymous";
+      el.src = url;
+      // Keep the element itself at unity; all gain is done in the graph.
+      el.volume = 1;
+      const node = this.ctx.createMediaElementSource(el);
+      node.connect(fade);
+      const start = track.cueStart ?? 0;
+      const end = track.cueEnd ?? (track.duration || 0);
+      const deck: StreamDeck = { kind: "stream", track, el, node, fade, trackGain, start, end, rate: 1, ended: false, started: false, scheduled: null, timer: null };
+      // Wait until we can actually play, so gapless/crossfade scheduling is
+      // not thrown off by a deck that is still opening the file.
+      await new Promise<void>((resolve) => {
+        if (el.readyState >= 3) return resolve();
+        const ok = () => { cleanup(); resolve(); };
+        const bad = () => { cleanup(); resolve(); }; // fall through; play() will surface the error
+        const cleanup = () => { el.removeEventListener("canplay", ok); el.removeEventListener("error", bad); };
+        el.addEventListener("canplay", ok, { once: true });
+        el.addEventListener("error", bad, { once: true });
+        // don't hang forever on a slow/unsupported file
+        setTimeout(ok, 4000);
+      });
+      // Prefer the element's own duration once known — cue-less files often
+      // have no reliable duration in the index.
+      if (!track.cueEnd && isFinite(el.duration) && el.duration > 0) deck.end = el.duration;
+      el.addEventListener("ended", () => { if (!deck.ended) { deck.ended = true; this.onDeckEnded(deck); } });
+      this.applyTrackGain(deck);
+      return deck;
+    }
+
+    const buffer = await this.decode(track);
     let start = track.cueStart ?? 0, end = track.cueEnd ?? buffer.duration;
     if (this.dsp.removeSilence && this.dsp.silenceEdges && !track.cueStart) {
       const s = detectSilence(buffer, this.dsp.silenceDb);
       start = Math.max(start, s.start); end = Math.min(end, s.end);
     }
-    const deck: Deck = { track, buffer, src: null, fade, trackGain, startCtx: 0, offset: start, start, end, rate: 1, ended: false };
+    const deck: PcmDeck = { kind: "pcm", track, buffer, src: null, fade, trackGain, startCtx: 0, offset: start, start, end, rate: 1, ended: false, started: false };
     this.applyTrackGain(deck);
     return deck;
   }
 
   private startDeck(deck: Deck, at: number, offset: number, fadeIn: number | null) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = deck.buffer;
     const rate = clamp(this.dsp.speed * this.dsp.tempo, 0.25, 4);
-    src.playbackRate.value = rate; src.detune.value = this.dsp.pitch * 100;
-    src.connect(deck.fade);
-    deck.src = src; deck.rate = rate; deck.startCtx = at; deck.offset = offset; deck.ended = false;
-    src.onended = () => { if (deck.src === src) { deck.ended = true; this.onDeckEnded(deck); } };
+    deck.rate = rate; deck.ended = false; deck.started = true;
+
+    // fade envelope is identical for both deck kinds
     if (fadeIn && fadeIn > 0) {
       deck.fade.gain.setValueAtTime(0.0001, at);
       try { deck.fade.gain.setValueCurveAtTime(curveValues(this.dsp.crossfadeCurve, 64, true), at, fadeIn); }
       catch { deck.fade.gain.linearRampToValueAtTime(1, at + fadeIn); }
     } else deck.fade.gain.setValueAtTime(1, at);
-    src.start(at, offset, Math.max(0.01, deck.end - offset));
+
+    if (deck.kind === "pcm") {
+      const src = this.ctx.createBufferSource();
+      src.buffer = deck.buffer;
+      src.playbackRate.value = rate; src.detune.value = this.dsp.pitch * 100;
+      src.connect(deck.fade);
+      deck.src = src; deck.startCtx = at; deck.offset = offset;
+      src.onended = () => { if (deck.src === src) { deck.ended = true; this.onDeckEnded(deck); } };
+      src.start(at, offset, Math.max(0.01, deck.end - offset));
+      return;
+    }
+
+    // Streaming deck: seek the element, then start it exactly at `at`.
+    const el = deck.el;
+    el.playbackRate = rate;
+    try { el.currentTime = offset; } catch { /* not seekable yet */ }
+    const delay = Math.max(0, at - this.ctx.currentTime);
+    const go = () => {
+      deck.timer = null; deck.scheduled = null;
+      el.play().catch((e) => this.onStatus?.(`Playback failed: ${e.message || e}`));
+    };
+    if (delay < 0.012) go();
+    else { deck.scheduled = at; deck.timer = window.setTimeout(go, delay * 1000); }
   }
 
   private deckPos(d: Deck): number {
-    if (!d.src) return d.offset;
-    return Math.min(d.end, d.offset + (this.ctx.currentTime - d.startCtx) * d.rate);
+    if (d.kind === "pcm") {
+      if (!d.src) return d.offset;
+      return Math.min(d.end, d.offset + (this.ctx.currentTime - d.startCtx) * d.rate);
+    }
+    return Math.min(d.end, d.el.currentTime);
+  }
+
+  private deckLive(d: Deck | null): boolean {
+    if (!d) return false;
+    return d.kind === "pcm" ? !!d.src : (d.started && !d.el.paused);
   }
 
   private stopDeck(d: Deck | null, fadeOut = 0) {
     if (!d) return;
-    const src = d.src; d.src = null;
-    if (!src) return;
-    src.onended = null;
     const t = this.ctx.currentTime;
     const fade = d.fade, trackGain = d.trackGain; // capture: seek/resume replace these on the deck
+
     if (fadeOut > 0) {
       try {
         fade.gain.cancelScheduledValues(t); fade.gain.setValueAtTime(fade.gain.value, t);
         fade.gain.linearRampToValueAtTime(0.0001, t + fadeOut);
       } catch { /* overlapping curve – just stop */ }
-      try { src.stop(t + fadeOut + 0.01); } catch { /* */ }
-    } else { try { src.stop(); } catch { /* */ } }
-    setTimeout(() => { try { fade.disconnect(); trackGain.disconnect(); } catch { /* */ } }, (fadeOut + 0.2) * 1000);
+    }
+
+    if (d.kind === "pcm") {
+      const src = d.src; d.src = null;
+      if (!src) return;
+      src.onended = null;
+      if (fadeOut > 0) { try { src.stop(t + fadeOut + 0.01); } catch { /* */ } }
+      else { try { src.stop(); } catch { /* */ } }
+      setTimeout(() => { try { fade.disconnect(); trackGain.disconnect(); } catch { /* */ } }, (fadeOut + 0.2) * 1000);
+      return;
+    }
+
+    // streaming deck
+    if (d.timer !== null) { clearTimeout(d.timer); d.timer = null; d.scheduled = null; }
+    const el = d.el, node = d.node;
+    const teardown = () => {
+      try { el.pause(); } catch { /* */ }
+      try { node.disconnect(); fade.disconnect(); trackGain.disconnect(); } catch { /* */ }
+      // Drop the media resource so Chromium frees its demuxer/decoder buffers.
+      try { el.removeAttribute("src"); el.load(); } catch { /* */ }
+    };
+    d.started = false;
+    if (fadeOut > 0) setTimeout(teardown, (fadeOut + 0.05) * 1000);
+    else teardown();
   }
   private stopDecks() { this.stopDeck(this.current); this.stopDeck(this.next); this.current = null; this.next = null; this.transition.active = false; }
+
 
   // ---------- transport ----------
   async play(track: Track, offset = 0) {
@@ -444,11 +633,36 @@ export class AudioEngine {
     this.pausePos = this.position;
     const d = this.current;
     this.paused = true;
-    if (this.dsp.fadeOnPause) { this.stopDeck(d, 0.25); }
-    else this.stopDeck(d);
+
+    if (d.kind === "stream") {
+      /*
+       * A streaming deck must NOT go through stopDeck() here: that drops the
+       * element's src to free the media resource, which would leave resume()
+       * with nothing to play. Just fade and pause the element in place — the
+       * decoder buffers stay, which is exactly what makes resume instant.
+       */
+      if (d.timer !== null) { clearTimeout(d.timer); d.timer = null; d.scheduled = null; }
+      const el = d.el;
+      if (this.dsp.fadeOnPause) {
+        const t = this.ctx.currentTime;
+        try {
+          d.fade.gain.cancelScheduledValues(t);
+          d.fade.gain.setValueAtTime(d.fade.gain.value, t);
+          d.fade.gain.linearRampToValueAtTime(0.0001, t + 0.25);
+        } catch { /* */ }
+        setTimeout(() => { if (this.paused) try { el.pause(); } catch { /* */ } }, 260);
+      } else {
+        try { el.pause(); } catch { /* */ }
+      }
+      d.started = false;
+    } else {
+      if (this.dsp.fadeOnPause) { this.stopDeck(d, 0.25); }
+      else this.stopDeck(d);
+      // keep deck object for resume
+      d.src = null; d.offset = d.start + this.pausePos;
+    }
+
     this.stopDeck(this.next); this.next = null; this.nextTrackRequested = null;
-    // keep deck object for resume
-    d.src = null; d.offset = d.start + this.pausePos;
     this.current = d;
     this.emit();
   }
@@ -456,8 +670,11 @@ export class AudioEngine {
     if (!this.paused || !this.current) return;
     if (this.ctx.state === "suspended") await this.ctx.resume();
     const d = this.current;
-    // recreate nodes (they were disconnected)
-    d.fade = this.ctx.createGain(); d.trackGain = this.ctx.createGain(); d.fade.connect(d.trackGain); d.trackGain.connect(this.input); this.applyTrackGain(d);
+    if (d.kind === "pcm") {
+      // recreate nodes (they were disconnected by stopDeck)
+      d.fade = this.ctx.createGain(); d.trackGain = this.ctx.createGain();
+      d.fade.connect(d.trackGain); d.trackGain.connect(this.input); this.applyTrackGain(d);
+    }
     this.startDeck(d, this.ctx.currentTime + 0.01, d.start + this.pausePos, this.dsp.fadeOnPause ? 0.2 : null);
     this.paused = false;
     this.emit();
@@ -467,14 +684,27 @@ export class AudioEngine {
   seek(pos: number) {
     const d = this.current; if (!d) return;
     pos = clamp(pos, 0, d.end - d.start - 0.05);
-    if (this.paused) { this.pausePos = pos; d.offset = d.start + pos; this.emit(); return; }
+    if (this.paused) {
+      this.pausePos = pos;
+      if (d.kind === "pcm") d.offset = d.start + pos; else { try { d.el.currentTime = d.start + pos; } catch { /* */ } }
+      this.emit(); return;
+    }
     // drop any scheduled next deck (will be rescheduled by tick)
-    if (this.next?.src) { this.stopDeck(this.next); const nt = this.next.track; this.next = null; this.nextTrackRequested = null; this.setNext(nt); }
+    if (this.next && this.deckLive(this.next)) { this.stopDeck(this.next); const nt = this.next.track; this.next = null; this.nextTrackRequested = null; this.setNext(nt); }
     this.transition.active = false;
-    const old = { ...d };
+    const startBase = d.start;
+    if (d.kind === "stream") {
+      // No teardown needed — just move the element and re-arm the envelope.
+      d.el.currentTime = startBase + pos;
+      d.fade.gain.cancelScheduledValues(this.ctx.currentTime);
+      d.fade.gain.setValueAtTime(1, this.ctx.currentTime);
+      if (d.el.paused) d.el.play().catch(() => { /* */ });
+      this.emit();
+      return;
+    }
     this.stopDeck(d, this.dsp.fadeOnSeek ? 0.03 : 0);
     d.fade = this.ctx.createGain(); d.trackGain = this.ctx.createGain(); d.fade.connect(d.trackGain); d.trackGain.connect(this.input); this.applyTrackGain(d);
-    this.startDeck(d, this.ctx.currentTime + 0.01, old.start + pos, this.dsp.fadeOnSeek ? 0.03 : null);
+    this.startDeck(d, this.ctx.currentTime + 0.01, startBase + pos, this.dsp.fadeOnSeek ? 0.03 : null);
     this.emit();
   }
 
@@ -492,13 +722,13 @@ export class AudioEngine {
   private nextScheduled = false;
   private tick() {
     const d = this.current;
-    if (!d || this.paused || !d.src) { this.nextScheduled = false; return; }
+    if (!d || this.paused || !this.deckLive(d)) { this.nextScheduled = false; return; }
     const remainingWall = (d.end - this.deckPos(d)) / d.rate;
     const xf = this.dsp.crossfade ? this.dsp.crossfadeSec : 0;
     if (this.transition.active) {
       this.transition.progress = clamp(1 - remainingWall / Math.max(0.01, this.transition.seconds), 0, 1);
     }
-    if (!this.nextScheduled && this.next && !this.next.src && remainingWall <= Math.max(xf, 0.25) + 0.15) {
+    if (!this.nextScheduled && this.next && !this.next.started && remainingWall <= Math.max(xf, 0.25) + 0.15) {
       const n = this.next;
       const at = this.ctx.currentTime + Math.max(0, remainingWall - xf);
       if (xf > 0) {
@@ -522,7 +752,7 @@ export class AudioEngine {
     const n = this.next;
     this.transition.active = false;
     this.nextScheduled = false;
-    if (n && n.src) {
+    if (n && n.started) {
       // gapless/crossfade handoff already happened
       setTimeout(() => { try { deck.fade.disconnect(); deck.trackGain.disconnect(); } catch { /* */ } }, 100);
       this.current = n; this.next = null; this.nextTrackRequested = null;
