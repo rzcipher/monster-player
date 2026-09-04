@@ -6,17 +6,26 @@ import { fmtTime, toCamelot } from "../lib/util";
 import { Cover, QualityBadge } from "./ui";
 
 export function Waveform({ height = 34, className = "" }: { height?: number; className?: string }) {
-  const s = useStore();
-  const t = s.tracks.find((x) => x.id === s.currentId);
-  const { pos, dur, transition } = usePosition(30);
+  // Subscribe narrowly: this canvas repaints ~15x/s and must not be tied to
+  // the whole store (which would re-render it on every unrelated change).
+  const wf = useStore((s) => s.tracks.find((x) => x.id === s.currentId)?.waveform);
+  const seek = useStore((s) => s.seek);
+  const { pos, dur, transition } = usePosition(15);
   const ref = useRef<HTMLCanvasElement>(null);
-  const wf = t?.waveform;
+  const sized = useRef({ w: 0, h: 0, dpr: 0 });
   useEffect(() => {
     const c = ref.current; if (!c) return;
     const dpr = window.devicePixelRatio || 1;
     const W = c.clientWidth, H = height;
-    c.width = W * dpr; c.height = H * dpr;
-    const g = c.getContext("2d")!; g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
+    // Resizing a canvas is expensive and clears it — only do it when the
+    // geometry actually changed, not on every animation frame.
+    if (sized.current.w !== W || sized.current.h !== H || sized.current.dpr !== dpr) {
+      c.width = W * dpr; c.height = H * dpr;
+      sized.current = { w: W, h: H, dpr };
+    }
+    const g = c.getContext("2d")!;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
     const n = 240; const bw = W / n;
     const progress = dur ? pos / dur : 0;
     const css = getComputedStyle(document.documentElement);
@@ -40,8 +49,8 @@ export function Waveform({ height = 34, className = "" }: { height?: number; cla
     }
     g.fillStyle = "#fff"; g.fillRect(W * progress - 0.5, 0, 1, H);
   }, [wf, pos, dur, height, transition]);
-  const seek = (e: React.MouseEvent) => { const r = e.currentTarget.getBoundingClientRect(); s.seek(((e.clientX - r.left) / r.width) * dur); };
-  return <canvas ref={ref} onClick={seek} className={`w-full cursor-pointer ${className}`} style={{ height }} />;
+  const onSeek = (e: React.MouseEvent) => { const r = e.currentTarget.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * dur); };
+  return <canvas ref={ref} onClick={onSeek} className={`w-full cursor-pointer ${className}`} style={{ height }} />;
 }
 
 export default function PlayerBar() {

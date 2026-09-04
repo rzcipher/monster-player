@@ -38,9 +38,21 @@ let lyricsWin = null;
 // Give the Web Audio graph the cleanest path Chromium offers; the native
 // WASAPI-exclusive / ASIO hook lives in an optional addon (see README).
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
-app.commandLine.appendSwitch("disable-features", "AudioServiceOutOfProcess,HardwareMediaKeyHandling");
-app.commandLine.appendSwitch("enable-features", "WebAudioSinkSelection,SharedArrayBuffer");
-app.commandLine.appendSwitch("force_high_performance_gpu");
+app.commandLine.appendSwitch("disable-features", [
+  "AudioServiceOutOfProcess",     // keep audio in-process: one less child process
+  "HardwareMediaKeyHandling",     // we register our own global media keys
+  "MediaSessionService",
+  "SpareRendererForSitePerProcess", // Chromium keeps a spare renderer warm (~80 MB) — we only ever have one page
+  "Translate",
+  "OptimizationHints",
+  "CalculateNativeWinOcclusion",
+].join(","));
+app.commandLine.appendSwitch("enable-features", "WebAudioSinkSelection");
+// A music player has no business holding a 4 GB heap. Cap it so V8 collects
+// decoded PCM aggressively instead of letting it pile up.
+app.commandLine.appendSwitch("js-flags", "--max-old-space-size=512 --expose-gc");
+app.commandLine.appendSwitch("renderer-process-limit", "1");
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
 
 // -------------------------------------------------------------- window state
 function readState() {
@@ -92,6 +104,15 @@ function createWindow() {
 
   // keep the audio clock accurate while the app is minimised / screen sleeps
   if (!psb) psb = powerSaveBlocker.start("prevent-app-suspension");
+
+  // Ask the OS to reclaim our working set when the window isn't on screen.
+  // On Windows this hands pages back to the system rather than squatting on them.
+  const trim = () => {
+    if (!win || win.isDestroyed()) return;
+    try { win.webContents.send("app:trimMemory"); } catch { /* ignore */ }
+  };
+  win.on("minimize", trim);
+  win.on("hide", trim);
 }
 
 // ------------------------------------------------------------------ docking

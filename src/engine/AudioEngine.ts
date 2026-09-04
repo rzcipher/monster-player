@@ -78,7 +78,19 @@ export class AudioEngine {
   onAdvance: ((track: Track) => void) | null = null; // engine auto-advanced to next
   onEnd: (() => void) | null = null; // nothing queued, playback stopped
   onStatus: ((msg: string) => void) | null = null;
+  /**
+   * Decoded-PCM cache.
+   *
+   * A 4-minute stereo track is ~81 MB of float32 PCM, so this is by far the
+   * heaviest thing in the process. We only ever need the playing deck and the
+   * pre-decoded next deck, and those hold their buffers directly — so the
+   * cache exists purely to make a re-play of the *immediately* previous track
+   * instant. Budget it in bytes, not entries.
+   */
   bufferCache = new Map<string, AudioBuffer>();
+  private cacheBytes = 0;
+  private static readonly CACHE_BUDGET = 192 * 1024 * 1024;
+  get cacheSize() { return this.cacheBytes; }
   outputInfo = { sampleRate: 0, latency: 0, sink: "default" };
   matchSourceRate = false;
 
@@ -177,7 +189,7 @@ export class AudioEngine {
     const track = this.current?.track || null;
     this.stopDecks();
     try { await this.ctx.close(); } catch { /* */ }
-    this.bufferCache.clear();
+    this.releaseCache();
     this.buildContext(sr);
     this.onStatus?.(`Output re-clocked to ${sr} Hz`);
     if (track && wasPlaying) await this.play(track, pos);
@@ -273,9 +285,53 @@ export class AudioEngine {
       try { buf = await this.ctx.decodeAudioData(ab); }
       catch { throw new Error(`Decoder rejected ${track.codec} (${track.path}). ALAC/DSD/APE need the native build's FFmpeg decoder.`); }
     }
-    if (this.bufferCache.size > 6) { const k = this.bufferCache.keys().next().value!; this.bufferCache.delete(k); }
-    this.bufferCache.set(track.path || track.id, buf);
+    this.cachePut(track.path || track.id, buf);
     return buf;
+  }
+
+  private static bufBytes(b: AudioBuffer) { return b.length * b.numberOfChannels * 4; }
+
+  private cachePut(key: string, buf: AudioBuffer) {
+    if (this.bufferCache.has(key)) return;
+    const size = AudioEngine.bufBytes(buf);
+    // never cache anything that would blow the whole budget on its own
+    if (size > AudioEngine.CACHE_BUDGET) return;
+    this.bufferCache.set(key, buf);
+    this.cacheBytes += size;
+    this.evict();
+  }
+
+  /** Drop least-recently-inserted buffers until we're back inside the budget. */
+  private evict() {
+    for (const [k, b] of this.bufferCache) {
+      if (this.cacheBytes <= AudioEngine.CACHE_BUDGET) break;
+      // keep anything currently loaded into a deck
+      if (b === this.current?.buffer || b === this.next?.buffer) continue;
+      this.bufferCache.delete(k);
+      this.cacheBytes -= AudioEngine.bufBytes(b);
+    }
+  }
+
+  /**
+   * Decode without touching the cache — used by background analysis so that
+   * scanning a library never parks hundreds of megabytes of PCM in memory.
+   */
+  async decodeTransient(track: Track): Promise<AudioBuffer> {
+    const cached = this.bufferCache.get(track.path || track.id);
+    if (cached) return cached;
+    if (track.source === "demo") return renderDemoTrack(track, this.ctx.sampleRate);
+    let file = track.file;
+    if (!file && track.handle) file = await track.handle.getFile();
+    if (!file) throw new Error("File not available — reconnect the library folder");
+    const ab = await file.arrayBuffer();
+    // decodeAudioData detaches the ArrayBuffer, so the compressed copy is freed for us
+    return this.ctx.decodeAudioData(ab);
+  }
+
+  /** Release all cached PCM (called on stop / library changes / memory pressure). */
+  releaseCache() {
+    this.bufferCache.clear();
+    this.cacheBytes = 0;
   }
 
   private async makeDeck(track: Track): Promise<Deck> {
@@ -337,7 +393,7 @@ export class AudioEngine {
     if (this.matchSourceRate && track.sampleRate && track.sampleRate !== this.ctx.sampleRate && track.source === "file") {
       const old = this.current; this.stopDecks();
       try { await this.ctx.close(); } catch { /* */ }
-      this.bufferCache.clear(); this.buildContext(track.sampleRate);
+      this.releaseCache(); this.buildContext(track.sampleRate);
       this.onStatus?.(`Output clocked to ${track.sampleRate} Hz (${old ? "switched" : "start"})`);
     }
     const manualXfade = this.dsp.crossfade && this.dsp.crossfadeOnManual && this.current && !this.paused;

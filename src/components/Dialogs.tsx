@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Tag, Sparkles, Settings2, ShieldAlert, Timer, Music, Disc3, Plus, Trash2 } from "lucide-react";
-import { useStore } from "../store";
+import { useStore, getEngine } from "../store";
+import { coverStats } from "../lib/covers";
 import { Modal, Toggle, Slider, QualityBadge } from "./ui";
 import { native } from "../lib/native";
 import type { Advisory, SmartRule, Track } from "../types";
@@ -100,6 +101,33 @@ export function SmartEditor() {
   );
 }
 
+/** Live memory readout so "is it leaking?" is answerable without DevTools. */
+function MemoryReadout() {
+  const [m, setM] = useState<{ used: number; limit: number } | null>(null);
+  const [covers, setCovers] = useState(0);
+  useEffect(() => {
+    const read = () => {
+      const perf = performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } };
+      if (perf.memory) setM({ used: perf.memory.usedJSHeapSize, limit: perf.memory.jsHeapSizeLimit });
+      setCovers(coverStats().distinct);
+    };
+    read();
+    const i = setInterval(read, 2000);
+    return () => clearInterval(i);
+  }, []);
+  const mb = (b: number) => (b / 1048576).toFixed(0) + " MB";
+  return (
+    <div className="text-[11px] text-muted flex flex-wrap items-center gap-x-4 gap-y-1">
+      {m && <span>JS heap: <b className="text-fg">{mb(m.used)}</b> / {mb(m.limit)}</span>}
+      <span>distinct covers: <b className="text-fg">{covers}</b></span>
+      <span>PCM cache: <b className="text-fg">{mb(getEngine().cacheSize)}</b></span>
+      <button className="underline hover:text-white" onClick={() => { getEngine().releaseCache(); (window as Window & { gc?: () => void }).gc?.(); }}>
+        free now
+      </button>
+    </div>
+  );
+}
+
 export function SettingsDialog() {
   const s = useStore();
   const st = s.settings;
@@ -160,6 +188,21 @@ export function SettingsDialog() {
             <Toggle checked={st.desktopLyrics} onChange={(v) => s.setSetting("desktopLyrics", v)} label={native ? "Floating desktop lyrics — always-on-top overlay above every window (Ctrl+Alt+K)" : "Floating desktop lyrics (available in the packaged desktop app)"} />
             <Toggle checked={st.karaoke} onChange={(v) => s.setSetting("karaoke", v)} label="Karaoke sweep: fill the active line word-by-word as it plays" />
             <Toggle checked={st.immersion} onChange={(v) => s.setSetting("immersion", v)} label="Immersion mode (hide artwork in Now Playing)" />
+          </div>
+        </section>
+        <section>
+          <div className="label mb-2">Performance</div>
+          <div className="space-y-2">
+            <Toggle checked={st.autoAnalyze} onChange={(v) => s.setSetting("autoAnalyze", v)}
+              label="Background analysis (loudness / key / BPM) — off by default; it decodes every file, so it costs CPU on big libraries" />
+            {s.analyzing && (
+              <div className="flex items-center gap-2 text-[11px] text-muted">
+                <span className="w-2 h-2 rounded-full accent-bg pulse-dot" />
+                Analysing… {s.analysisQueue.length} left
+                <button className="underline hover:text-white" onClick={s.cancelAnalysis}>cancel</button>
+              </div>
+            )}
+            <MemoryReadout />
           </div>
         </section>
         <section>

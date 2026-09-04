@@ -57,4 +57,5 @@ contextBridge.exposeInMainWorld("saltbee", {
     return () => offs.forEach((f) => f());
   },
   onOpenFiles: on("open:files"),
+  onTrimMemory: on("app:trimMemory"),
 });

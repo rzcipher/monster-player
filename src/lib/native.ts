@@ -44,6 +44,7 @@ export interface NativeApi {
   cli(payload: { action: string; path: string; isrc?: string; mbid?: string }): Promise<{ code: number; out: string }>;
   onMedia(cb: (key: MediaKey) => void): () => void;
   onOpenFiles(cb: (files: string[]) => void): () => void;
+  onTrimMemory(cb: () => void): () => void;
 }
 
 declare global {

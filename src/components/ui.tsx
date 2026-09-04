@@ -108,7 +108,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
 export function Cover({ url, size, className = "", rounded = "rounded-md" }: { url: string | null; size: number | string; className?: string; rounded?: string }) {
   return (
     <div className={`${rounded} overflow-hidden shrink-0 ${className}`} style={{ width: size, height: size, background: "linear-gradient(135deg, var(--c-dominant), var(--c-surface))" }}>
-      {url ? <img src={url} alt="" className="w-full h-full object-cover" draggable={false} /> : (
+      {url ? <img src={url} alt="" className="w-full h-full object-cover" draggable={false} loading="lazy" decoding="async" /> : (
         <div className="w-full h-full flex items-center justify-center text-muted"><svg width="40%" height="40%" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="2.5" /></svg></div>
       )}
     </div>

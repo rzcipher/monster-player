@@ -54,6 +54,11 @@ export default function App() {
       native.onDockRevealed((revealed) => useStore.setState({ dockRevealed: revealed })),
       native.onOpenFiles((files) => st().importNativePaths(files, true)),
       native.onScanProgress((p) => useStore.setState({ scan: { ...st().scan, active: true, done: p.done, current: p.current } })),
+      // window minimised/hidden → hand the decoded-PCM cache back to the OS
+      native.onTrimMemory(() => {
+        getEngine().releaseCache();
+        (window as Window & { gc?: () => void }).gc?.();
+      }),
     ];
     // restore dock/always-on-top preferences chosen in a previous session
     const s0 = st();

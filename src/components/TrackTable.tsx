@@ -8,6 +8,7 @@ import { QualityBadge, CamelotChip, Stars, TrimKnob, ContextMenu, Cover, type Me
 import { groupTracks, GROUP_OPTIONS } from "../lib/grouping";
 import { SORT_PRESETS } from "../lib/util";
 import { native, openUrl } from "../lib/native";
+import { useVirtual } from "../hooks/useVirtual";
 
 const COLS: { key: ColumnKey; label: string; w: number; align?: "right" | "center" }[] = [
   { key: "index", label: "#", w: 44 }, { key: "title", label: "Title", w: 260 }, { key: "artist", label: "Artist", w: 160 }, { key: "albumArtist", label: "Album Artist", w: 150 },
@@ -172,11 +173,17 @@ export default function TrackTable() {
     }
     return out;
   }, [groups, list, collapsed]);
+
+  // Only the visible slice becomes DOM. Rows are a fixed 32px (h-8); group
+  // headers are the same height, so one uniform row height covers both.
+  const ROW_H = 32;
+  const v = useVirtual(rows.length, ROW_H);
+  const slice = rows.slice(v.start, v.end);
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <Toolbar list={list} />
-      <div className="flex-1 overflow-auto">
-        <table className="border-collapse text-[12px] w-max min-w-full">
+      <div className="flex-1 overflow-auto" ref={v.scrollRef}>
+        <table className="border-collapse text-[12px] w-max min-w-full" style={{ contain: "content" }}>
           <thead className="sticky top-0 z-10 themed-bg">
             <tr className="text-left text-muted">
               {cols.map((c) => (
@@ -187,7 +194,9 @@ export default function TrackTable() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => {
+            {v.padTop > 0 && <tr style={{ height: v.padTop }} aria-hidden><td colSpan={cols.length} className="p-0 border-0" /></tr>}
+            {slice.map((row, si) => {
+              const i = v.start + si;
               if (row.group) {
                 const g = row.group;
                 const isCollapsed = collapsed.includes(g.key);
@@ -237,6 +246,7 @@ export default function TrackTable() {
                 </Fragment>
               );
             })}
+            {v.padBottom > 0 && <tr style={{ height: v.padBottom }} aria-hidden><td colSpan={cols.length} className="p-0 border-0" /></tr>}
             {!list.length && <tr><td colSpan={cols.length} className="p-10 text-center text-muted">Nothing here. {s.search ? "Try a different search — operators: bpm:>120 key:8A genre:pop year:<2000" : "Open a folder from File → Open folder."}</td></tr>}
           </tbody>
         </table>

@@ -1,10 +1,11 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 import type { Track, Playlist, RepeatMode, DspState, Palette, ViewMode, LibraryFilter, ColumnKey, SortDir, ScrobbleEntry, SmartRule, GroupBy, ArtistViewMode } from "./types";
 import { AudioEngine } from "./engine/AudioEngine";
 import { buildDemoLibrary } from "./lib/demo";
 import { DEFAULT_PALETTE, extractPalette, applyPalette, staticPalette, type ThemeMode } from "./lib/colors";
 import { native, nativeFile } from "./lib/native";
+import { releaseCover, releaseAllCovers } from "./lib/covers";
 import { seededShuffle, uid, dupKey, camelotCompatible, matchesSmart, qualityScore } from "./lib/util";
 import { analyzeLoudness, detectKey, detectBpm, waveformPeaks } from "./lib/analysis";
 import { fetchLrclib, plainToLines } from "./lib/lyrics";
@@ -167,6 +168,7 @@ interface State {
   upgradeTo: (fromId: string, toId: string) => void;
   analyzeTrack: (id: string) => Promise<void>;
   analyzeAll: () => void;
+  cancelAnalysis: () => void;
   fetchLyrics: (id: string) => Promise<void>;
   scrobble: (t: Track) => Promise<void>;
   cliAction: (action: "fix-metadata" | "retranslate" | "demucs-acapella" | "retag", t: Track) => Promise<void>;
@@ -220,7 +222,13 @@ function afterTrackChange(t: Track) {
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: t.coverUrl ? [{ src: t.coverUrl, sizes: "512x512" }] : [] });
   }
-  if (!posSaver) posSaver = window.setInterval(() => { const e = engine; if (e && !e.isPaused) useStore.setState({ resumePos: e.position }); }, 4000);
+  if (!posSaver) posSaver = window.setInterval(() => {
+    const e = engine;
+    if (!e || e.isPaused) return;
+    const p = Math.round(e.position);
+    // only touch the store when the whole-second position changed by >=5s
+    if (Math.abs(p - useStore.getState().resumePos) >= 5) useStore.setState({ resumePos: p });
+  }, 5000);
 }
 
 function udKey(t: Track) { return t.source === "demo" ? t.id : t.path + (t.cueStart ? "#" + t.cueStart : ""); }
@@ -235,7 +243,7 @@ export const useStore = create<State>()(
       settingsOpen: false, tagEditorId: null, smartEditorId: null, quarantineOpen: false, sleepOpen: false, docked: false, dockExpanded: false, dockRevealed: true, groupBy: "none", artistView: "tree", rightPanel: "queue",
       sleepEndsAt: null, scrobbles: [], status: "Ready", scan: { active: false, done: 0, total: 0, current: "" }, userData: {}, resumePos: 0,
       analysisQueue: [], analyzing: false, outputs: [], libraryName: "Demo library", libraryRoots: [], contextMenu: null, promptReq: null,
-      settings: { listenBrainzToken: "", listenBrainzUser: "", cliBridgeUrl: "http://127.0.0.1:7788", matchSourceRate: false, resumeOnStart: true, autoLrclib: true, showTranslation: true, immersion: false, autoAnalyze: true, outputDevice: "", autoQuarantine: true,
+      settings: { listenBrainzToken: "", listenBrainzUser: "", cliBridgeUrl: "http://127.0.0.1:7788", matchSourceRate: false, resumeOnStart: true, autoLrclib: true, showTranslation: true, immersion: false, autoAnalyze: false, outputDevice: "", autoQuarantine: true,
         themeMode: "adaptive", adaptiveTheme: true, coverBackdrop: true, backdropStrength: 0.5, animations: true, karaoke: true, desktopLyrics: false, cornerRadius: 12, fontScale: 1,
         dockAutoHide: true, dockOpacity: 1, alwaysOnTop: false },
 
@@ -245,9 +253,19 @@ export const useStore = create<State>()(
 
       init: async () => {
         const s = get();
-        let tracks = buildDemoLibrary();
+        // Only synthesise the demo library when there's no real one to load —
+        // otherwise it's pure startup cost plus six permanently-resident tracks.
+        const hasRealLibrary = (s.libraryRoots?.length ?? 0) > 0;
+        let tracks: Track[] = hasRealLibrary ? [] : buildDemoLibrary();
         // reconnect persisted folder if possible
-        const h = await loadDirHandle();
+        // native shell: rescan the remembered roots instead of the browser handle
+        if (native && hasRealLibrary) {
+          for (const root of s.libraryRoots) {
+            try { await get().importNativeFolder(root); } catch { /* folder moved/offline */ }
+          }
+          tracks = get().tracks;
+        }
+        const h = native ? null : await loadDirHandle();
         if (h) {
           try {
             const perm = await (h as FileSystemDirectoryHandle & { queryPermission: (o: { mode: string }) => Promise<string> }).queryPermission({ mode: "read" });
@@ -259,9 +277,10 @@ export const useStore = create<State>()(
             } else set({ status: `Library folder "${h.name}" needs permission — click Reconnect` });
           } catch { /* */ }
         }
-        // apply saved user data
+        // apply saved user data (importNativeFolder already did this for its own
+        // results, so only map the tracks we assembled here)
         tracks = tracks.map((t) => { const u = s.userData[udKey(t)]; return u ? { ...t, rating: u.rating, playCount: u.playCount, lastPlayed: u.lastPlayed, trim: u.trim } : t; });
-        set({ tracks });
+        if (tracks.length !== get().tracks.length || !native || !hasRealLibrary) set({ tracks });
         get().recomputeDupes();
         const ids = new Set(get().tracks.map((t) => t.id));
         const queue = s.queue.filter((id) => ids.has(id));
@@ -384,7 +403,7 @@ export const useStore = create<State>()(
         if (get().settings.autoAnalyze) get().analyzeAll();
       },
 
-      clearLibrary: () => { set({ tracks: buildDemoLibrary(), queue: [], currentId: null, playing: false }); getEngine().stop(); get().recomputeDupes(); },
+      clearLibrary: () => { releaseAllCovers(); getEngine().releaseCache(); set({ tracks: buildDemoLibrary(), queue: [], currentId: null, playing: false }); getEngine().stop(); get().recomputeDupes(); },
 
       playTrack: async (id, contextIds) => {
         const s = get();
@@ -550,12 +569,18 @@ export const useStore = create<State>()(
         if (s.currentId === fromId) { const pos = getEngine().position; const t = s.tracks.find((x) => x.id === toId); if (t) { set({ currentId: toId }); getEngine().play(t, pos).then(() => afterTrackChange(t)); } }
         else get().syncNext();
       },
-      removeTracks: (ids) => { set({ tracks: get().tracks.filter((t) => !ids.includes(t.id)), queue: get().queue.filter((i) => !ids.includes(i)), selected: [] }); get().syncNext(); },
+      removeTracks: (ids) => {
+        const gone = get().tracks.filter((t) => ids.includes(t.id));
+        set({ tracks: get().tracks.filter((t) => !ids.includes(t.id)), queue: get().queue.filter((i) => !ids.includes(i)), selected: [] });
+        for (const t of gone) releaseCover(t.coverUrl);
+        get().syncNext();
+      },
 
       analyzeTrack: async (id) => {
         const t = get().tracks.find((x) => x.id === id); if (!t) return;
         try {
-          const buf = await getEngine().decode(t);
+          // transient decode: the PCM is thrown away as soon as we're done with it
+          const buf = await getEngine().decodeTransient(t);
           const { gain, peak, energy } = analyzeLoudness(buf);
           const wf = waveformPeaks(buf);
           const patch: Partial<Track> = { analyzedGain: gain, analyzedPeak: peak, waveform: wf, energy };
@@ -571,15 +596,26 @@ export const useStore = create<State>()(
         if (!pending.length || s.analyzing) return;
         set({ analyzing: true, analysisQueue: pending });
         const run = async () => {
+          let done = 0;
           while (get().analysisQueue.length) {
             const [id, ...rest] = get().analysisQueue; set({ analysisQueue: rest });
             await get().analyzeTrack(id);
-            await new Promise((r) => setTimeout(r, 30));
+            // Yield generously: analysis is a *background* chore and must never
+            // compete with playback or make the UI feel sticky. Idle time only.
+            await new Promise<void>((r) => {
+              const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+              if (w.requestIdleCallback) w.requestIdleCallback(() => r(), { timeout: 400 });
+              else setTimeout(r, 120);
+            });
+            // periodically let the GC reclaim decoded PCM
+            if (++done % 12 === 0) getEngine().releaseCache();
           }
+          getEngine().releaseCache();
           set({ analyzing: false, status: "Loudness / key / BPM analysis complete" });
         };
         run();
       },
+      cancelAnalysis: () => { set({ analysisQueue: [], analyzing: false, status: "Analysis cancelled" }); getEngine().releaseCache(); },
 
       fetchLyrics: async (id) => {
         const t = get().tracks.find((x) => x.id === id); if (!t) return;
@@ -658,6 +694,37 @@ export const useStore = create<State>()(
     }),
     {
       name: "saltbee-v1",
+      /**
+       * Debounced writer.
+       *
+       * zustand/persist serialises the whole partialized state on *every*
+       * set() — and we call set() per analysed track and every 4 s for the
+       * resume position. On a large library that was a continuous
+       * JSON.stringify of the entire userData map. Coalesce writes instead.
+       */
+      storage: createJSONStorage(() => {
+        let pending: string | null = null;
+        let timer: number | null = null;
+        const flush = () => {
+          timer = null;
+          if (pending === null) return;
+          try { localStorage.setItem("saltbee-v1", pending); } catch { /* quota */ }
+          pending = null;
+        };
+        // make sure nothing is lost when the window goes away
+        if (typeof window !== "undefined") {
+          window.addEventListener("beforeunload", flush);
+          document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
+        }
+        return {
+          getItem: (k) => localStorage.getItem(k),
+          setItem: (_k, v) => {
+            pending = v;
+            if (timer === null) timer = window.setTimeout(flush, 1500);
+          },
+          removeItem: (k) => { pending = null; localStorage.removeItem(k); },
+        };
+      }),
       partialize: (s) => ({
         playlists: s.playlists, queue: s.queue, currentId: s.currentId, shuffle: s.shuffle, shuffleSeed: s.shuffleSeed, repeat: s.repeat, keyMix: s.keyMix,
         view: s.view, sortCol: s.sortCol, sortDir: s.sortDir, sortPreset: s.sortPreset, visibleCols: s.visibleCols, dsp: s.dsp, volume: s.volume, docked: s.docked, rightPanel: s.rightPanel, groupBy: s.groupBy, artistView: s.artistView,

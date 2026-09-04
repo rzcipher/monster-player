@@ -27,24 +27,48 @@ function fft(re: Float32Array, im: Float32Array) {
   }
 }
 
-function mono(buf: AudioBuffer): Float32Array {
+/**
+ * Zero-copy mono access.
+ *
+ * The old implementation allocated a full-length Float32Array (40 MB for a
+ * 4-minute track) at every call site. Instead we keep references to the
+ * channel data and mix on read — analysis is sequential, so this costs
+ * nothing in speed but allocates nothing at all.
+ */
+interface MonoView { length: number; at(i: number): number }
+
+function monoView(buf: AudioBuffer): MonoView {
   const n = buf.length;
-  const out = new Float32Array(n);
-  for (let c = 0; c < buf.numberOfChannels; c++) {
-    const d = buf.getChannelData(c);
-    for (let i = 0; i < n; i++) out[i] += d[i] / buf.numberOfChannels;
+  const ch = buf.numberOfChannels;
+  if (ch === 1) {
+    const d = buf.getChannelData(0);
+    return { length: n, at: (i) => d[i] };
   }
-  return out;
+  if (ch === 2) {
+    const l = buf.getChannelData(0), r = buf.getChannelData(1);
+    return { length: n, at: (i) => (l[i] + r[i]) * 0.5 };
+  }
+  const chans: Float32Array[] = [];
+  for (let c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
+  const inv = 1 / ch;
+  return { length: n, at: (i) => { let v = 0; for (let c = 0; c < ch; c++) v += chans[c][i]; return v * inv; } };
+}
+
+/** Downmix a *window* into a scratch buffer (used by the FFT, which needs contiguous data). */
+function fillWindow(m: MonoView, out: Float32Array, offset: number) {
+  const n = out.length;
+  for (let i = 0; i < n; i++) out[i] = m.at(offset + i);
 }
 
 // ------- loudness (RMS-based, approximating LUFS with K-ish weighting omitted) -------
 export function analyzeLoudness(buf: AudioBuffer): { gain: number; peak: number; energy: number } {
-  const m = mono(buf);
+  const m = monoView(buf);
   let sum = 0, peak = 0;
-  const step = Math.max(1, Math.floor(m.length / 2_000_000));
+  // cap the work at ~500k samples regardless of track length
+  const step = Math.max(1, Math.floor(m.length / 500_000));
   let count = 0;
   for (let i = 0; i < m.length; i += step) {
-    const v = m[i];
+    const v = m.at(i);
     sum += v * v; count++;
     const a = Math.abs(v);
     if (a > peak) peak = a;
@@ -59,15 +83,15 @@ export function analyzeLoudness(buf: AudioBuffer): { gain: number; peak: number;
 
 // ------- waveform peaks for the seek bar -------
 export function waveformPeaks(buf: AudioBuffer, bins = 240): number[] {
-  const m = mono(buf);
+  const m = monoView(buf);
   const per = Math.floor(m.length / bins);
   const out: number[] = [];
   let max = 0;
   for (let b = 0; b < bins; b++) {
     let p = 0;
     const start = b * per;
-    const stride = Math.max(1, Math.floor(per / 400));
-    for (let i = start; i < start + per; i += stride) { const a = Math.abs(m[i]); if (a > p) p = a; }
+    const stride = Math.max(1, Math.floor(per / 120));
+    for (let i = start; i < start + per; i += stride) { const a = Math.abs(m.at(i)); if (a > p) p = a; }
     out.push(p); if (p > max) max = p;
   }
   return out.map((v) => (max ? v / max : 0));
@@ -75,11 +99,11 @@ export function waveformPeaks(buf: AudioBuffer, bins = 240): number[] {
 
 // ------- silence detection at edges -------
 export function detectSilence(buf: AudioBuffer, thresholdDb: number): { start: number; end: number } {
-  const m = mono(buf);
+  const m = monoView(buf);
   const thr = Math.pow(10, thresholdDb / 20);
   let s = 0, e = m.length - 1;
-  while (s < m.length && Math.abs(m[s]) < thr) s++;
-  while (e > s && Math.abs(m[e]) < thr) e--;
+  while (s < m.length && Math.abs(m.at(s)) < thr) s++;
+  while (e > s && Math.abs(m.at(e)) < thr) e--;
   return { start: s / buf.sampleRate, end: (e + 1) / buf.sampleRate };
 }
 
@@ -93,17 +117,18 @@ function corr(a: number[], b: number[]) {
   return num / Math.sqrt(da * db || 1);
 }
 export function detectKey(buf: AudioBuffer): { key: string; confidence: number } {
-  const m = mono(buf);
+  const m = monoView(buf);
   const sr = buf.sampleRate;
   const N = 4096;
-  const frames = 48;
+  const frames = 32;
   const chroma = new Array(12).fill(0);
   const re = new Float32Array(N), im = new Float32Array(N);
   const hop = Math.max(N, Math.floor((m.length - N) / frames));
   for (let f = 0; f < frames; f++) {
     const off = f * hop;
     if (off + N > m.length) break;
-    for (let i = 0; i < N; i++) { re[i] = m[off + i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N)); im[i] = 0; }
+    fillWindow(m, re, off);
+    for (let i = 0; i < N; i++) { re[i] *= 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N); im[i] = 0; }
     fft(re, im);
     for (let k = 2; k < N / 2; k++) {
       const freq = (k * sr) / N;
@@ -129,17 +154,22 @@ export function detectKey(buf: AudioBuffer): { key: string; confidence: number }
 
 // ------- BPM: energy-flux onset + autocorrelation over 60–180 -------
 export function detectBpm(buf: AudioBuffer): number | null {
-  const m = mono(buf);
+  const m = monoView(buf);
   const sr = buf.sampleRate;
   const hop = 512;
-  const nFrames = Math.floor(m.length / hop);
+  // Tempo is stable across a track — analysing a 60 s excerpt from the middle
+  // gives the same answer for a fraction of the work.
+  const maxSamples = sr * 60;
+  const begin = m.length > maxSamples ? Math.floor((m.length - maxSamples) / 2) : 0;
+  const span = Math.min(m.length - begin, maxSamples);
+  const nFrames = Math.floor(span / hop);
   if (nFrames < 200) return null;
   const env = new Float32Array(nFrames);
   for (let f = 0; f < nFrames; f++) {
     let s = 0;
-    const o = f * hop;
-    for (let i = 0; i < hop; i += 4) s += m[o + i] * m[o + i];
-    env[f] = Math.sqrt(s / (hop / 4));
+    const o = begin + f * hop;
+    for (let i = 0; i < hop; i += 8) s += m.at(o + i) * m.at(o + i);
+    env[f] = Math.sqrt(s / (hop / 8));
   }
   const flux = new Float32Array(nFrames);
   for (let i = 1; i < nFrames; i++) flux[i] = Math.max(0, env[i] - env[i - 1]);

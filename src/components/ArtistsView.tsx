@@ -133,7 +133,7 @@ function ArtistMosaic({ artist, size }: { artist: ArtistEntry; size: number }) {
   if (covers.length <= 1) return <Cover url={covers[0] || null} size={size} rounded="rounded-full" className="object-cover" />;
   return (
     <div className="grid grid-cols-2 overflow-hidden shrink-0 rounded-full" style={{ width: size, height: size }}>
-      {covers.slice(0, 4).map((c, i) => <img key={i} src={c} alt="" className="w-full h-full object-cover" />)}
+      {covers.slice(0, 4).map((c, i) => <img key={i} src={c} alt="" className="w-full h-full object-cover" loading="lazy" decoding="async" />)}
     </div>
   );
 }
@@ -141,7 +141,7 @@ function ArtistMosaic({ artist, size }: { artist: ArtistEntry; size: number }) {
 function ArtistHeader({ a, onPlay, onShuffle, onQueue }: { a: ArtistEntry; onPlay: () => void; onShuffle: () => void; onQueue: () => void }) {
   return (
     <div className="relative px-6 pt-7 pb-5 overflow-hidden">
-      {a.cover && <img src={a.cover} alt="" aria-hidden className="absolute inset-0 w-full h-full object-cover opacity-25 blur-3xl scale-125 pointer-events-none" />}
+      {a.cover && <img src={a.cover} alt="" aria-hidden loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover opacity-25 blur-3xl scale-125 pointer-events-none" />}
       <div className="absolute inset-0 pointer-events-none" style={{ background: "linear-gradient(to bottom, transparent, var(--c-bg))" }} />
       <div className="relative flex items-end gap-5">
         <ArtistMosaic artist={a} size={132} />

@@ -2,6 +2,7 @@ import { parseBlob, TimestampFormat, type IAudioMetadata } from "music-metadata"
 import type { Track, Advisory } from "../types";
 import { uid, qualityScore } from "./util";
 import { parseLrc, plainToLines } from "./lyrics";
+import { registerCover } from "./covers";
 
 export const AUDIO_EXT = /\.(flac|m4a|mp4|alac|aac|mp3|ogg|oga|opus|wav|wave|aiff?|aif|wv|ape|dsf|dff|mka|webm|caf|tta|mpc)$/i;
 
@@ -101,7 +102,8 @@ export async function parseFile(file: File, path: string, handle?: FileSystemFil
     if (c.picture?.[0]) {
       const p = c.picture[0];
       const bytes = p.data instanceof Uint8Array ? p.data : new Uint8Array(p.data as ArrayBuffer);
-      t.coverUrl = URL.createObjectURL(new Blob([bytes as BlobPart], { type: p.format || "image/jpeg" }));
+      // shared + downscaled: one entry per distinct image across the album
+      t.coverUrl = await registerCover(bytes, p.format || "image/jpeg");
     }
     // SYLT (synchronised lyrics frames) first, then USLT / LYRICS / ©lyr text (which may itself be LRC)
     const sylt = c.lyrics?.find((l) => l.syncText?.length);
