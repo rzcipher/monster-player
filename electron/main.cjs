@@ -54,6 +54,60 @@ app.commandLine.appendSwitch("js-flags", "--max-old-space-size=512 --expose-gc")
 app.commandLine.appendSwitch("renderer-process-limit", "1");
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 
+// ------------------------------------------------------- blob-storage cleanup
+/**
+ * Reclaim leaked Chromium blob spill files.
+ *
+ * Older builds wrapped every scanned track in `new File([bytes])` and kept it
+ * alive on the Track object. Chromium registers each of those in its blob
+ * store and, past an in-memory quota, pages them out to
+ * %APPDATA%/SaltBee/blob_storage/<uuid>/ as ~10 MB chunk files — which is how
+ * a single library import grew to ~11 GB on disk.
+ *
+ * The renderer no longer creates those blobs at all, but existing installs
+ * still have the spill directory. Blob storage is scratch space that Chromium
+ * recreates on demand, so deleting it at startup (before any window exists) is
+ * safe and frees the space immediately.
+ */
+function reclaimBlobStorage() {
+  const dir = path.join(app.getPath("userData"), "blob_storage");
+  let freed = 0;
+  try {
+    if (!fs.existsSync(dir)) return 0;
+    for (const entry of fs.readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      try {
+        for (const f of fs.readdirSync(full)) {
+          try { freed += fs.statSync(path.join(full, f)).size; } catch { /* ignore */ }
+        }
+      } catch {
+        try { freed += fs.statSync(full).size; } catch { /* ignore */ }
+      }
+      fs.rmSync(full, { recursive: true, force: true });
+    }
+  } catch { /* in use — Chromium will clean it up itself */ }
+  if (freed > 0) console.log(`[SaltBee] reclaimed ${(freed / 1073741824).toFixed(2)} GB of stale blob storage`);
+  return freed;
+}
+
+let reclaimedBytes = 0;
+ipcMain.handle("app:reclaimed", () => reclaimedBytes);
+ipcMain.handle("app:diskUsage", () => {
+  const root = app.getPath("userData");
+  const walk = (d) => {
+    let n = 0;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return 0; }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) n += walk(full);
+      else { try { n += fs.statSync(full).size; } catch { /* ignore */ } }
+    }
+    return n;
+  };
+  return { path: root, bytes: walk(root) };
+});
+
 // -------------------------------------------------------------- window state
 function readState() {
   try { return JSON.parse(fs.readFileSync(stateFile(), "utf8")); } catch { return null; }
@@ -411,6 +465,8 @@ else {
 
   app.whenReady().then(() => {
     if (isWin) app.setAppUserModelId("com.saltbee.player");
+    // must run before any renderer starts using blob storage
+    reclaimedBytes = reclaimBlobStorage();
     createWindow();
     startCliBridge();
     buildTray();

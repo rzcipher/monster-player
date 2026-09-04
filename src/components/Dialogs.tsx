@@ -105,6 +105,13 @@ export function SmartEditor() {
 function MemoryReadout() {
   const [m, setM] = useState<{ used: number; limit: number } | null>(null);
   const [covers, setCovers] = useState(0);
+  const [disk, setDisk] = useState<{ path: string; bytes: number } | null>(null);
+  const [reclaimed, setReclaimed] = useState(0);
+  useEffect(() => {
+    if (!native) return;
+    native.diskUsage().then(setDisk).catch(() => {});
+    native.reclaimedBytes().then(setReclaimed).catch(() => {});
+  }, []);
   useEffect(() => {
     const read = () => {
       const perf = performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } };
@@ -121,6 +128,12 @@ function MemoryReadout() {
       {m && <span>JS heap: <b className="text-fg">{mb(m.used)}</b> / {mb(m.limit)}</span>}
       <span>distinct covers: <b className="text-fg">{covers}</b></span>
       <span>PCM cache: <b className="text-fg">{mb(getEngine().cacheSize)}</b></span>
+      {disk && (
+        <span title={disk.path}>
+          app data on disk: <b className="text-fg">{mb(disk.bytes)}</b>
+          {reclaimed > 0 && <span className="text-emerald-300"> (reclaimed {mb(reclaimed)} at startup)</span>}
+        </span>
+      )}
       <button className="underline hover:text-white" onClick={() => { getEngine().releaseCache(); (window as Window & { gc?: () => void }).gc?.(); }}>
         free now
       </button>

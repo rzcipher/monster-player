@@ -1,4 +1,4 @@
-import { parseBlob, TimestampFormat, type IAudioMetadata } from "music-metadata";
+import { parseBlob, parseBuffer, TimestampFormat, type IAudioMetadata } from "music-metadata";
 import type { Track, Advisory } from "../types";
 import { uid, qualityScore } from "./util";
 import { parseLrc, plainToLines } from "./lyrics";
@@ -66,16 +66,34 @@ export function blankTrack(): Track {
   };
 }
 
-export async function parseFile(file: File, path: string, handle?: FileSystemFileHandle): Promise<Track> {
+/**
+ * Parse tags from raw bytes — no Blob, no File, nothing registered with
+ * Chromium's blob store. Used by the packaged app's native scanner.
+ *
+ * The bytes are released as soon as this returns; only the small Track object
+ * survives. See parseNativeFile() for why that matters.
+ */
+export async function parseBytes(bytes: Uint8Array, path: string, name: string, size: number, mtime: number): Promise<Track> {
   const t = blankTrack();
-  t.file = file; t.handle = handle; t.path = path;
-  t.folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-  t.fileSize = file.size;
-  t.title = file.name.replace(/\.[^.]+$/, "");
+  t.path = path;
+  t.folder = path.includes("/") || path.includes("\\") ? path.slice(0, Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))) : "";
+  t.fileSize = size;
+  t.added = mtime || Date.now();
+  t.title = name.replace(/\.[^.]+$/, "");
   try {
-    const m = await parseBlob(file, { duration: true, skipPostHeaders: false });
+    const m = await parseBuffer(bytes, { mimeType: "", size }, { duration: true, skipPostHeaders: false });
+    await applyMetadata(t, m, name);
+  } catch (e) {
+    console.warn("metadata parse failed", path, e);
+  }
+  t.qualityScore = qualityScore(t);
+  return t;
+}
+
+/** Map parsed metadata onto a Track. Shared by the Blob and raw-bytes paths. */
+async function applyMetadata(t: Track, m: IAudioMetadata, name: string): Promise<void> {
     const c = m.common, f = m.format;
-    const { codec, lossless } = codecName(m, file.name);
+    const { codec, lossless } = codecName(m, name);
     t.codec = codec; t.lossless = lossless;
     t.title = c.title || t.title;
     t.artist = c.artists?.join("; ") || c.artist || "";
@@ -96,7 +114,7 @@ export async function parseFile(file: File, path: string, handle?: FileSystemFil
     t.bitDepth = f.bitsPerSample || null;
     t.channels = f.numberOfChannels || 2;
     t.duration = f.duration || 0;
-    t.bitrate = f.bitrate ? Math.round(f.bitrate / 1000) : t.duration ? Math.round((file.size * 8) / t.duration / 1000) : 0;
+    t.bitrate = f.bitrate ? Math.round(f.bitrate / 1000) : t.duration ? Math.round((t.fileSize * 8) / t.duration / 1000) : 0;
     t.rgTrackGain = parseGainDb(c.replaygain_track_gain?.dB ?? nativeTag(m, ["REPLAYGAIN_TRACK_GAIN"]) ?? null);
     t.rgTrackPeak = parseGainDb(c.replaygain_track_peak?.ratio ?? null);
     if (c.picture?.[0]) {
@@ -119,6 +137,17 @@ export async function parseFile(file: File, path: string, handle?: FileSystemFil
       t.lyrics = parseLrc(lyricText) || plainToLines(lyricText, t.duration);
       t.lyricsSource = t.lyrics ? "embedded" : "none";
     }
+}
+
+export async function parseFile(file: File, path: string, handle?: FileSystemFileHandle): Promise<Track> {
+  const t = blankTrack();
+  t.file = file; t.handle = handle; t.path = path;
+  t.folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  t.fileSize = file.size;
+  t.title = file.name.replace(/\.[^.]+$/, "");
+  try {
+    const m = await parseBlob(file, { duration: true, skipPostHeaders: false });
+    await applyMetadata(t, m, file.name);
   } catch (e) {
     console.warn("metadata parse failed", path, e);
   }

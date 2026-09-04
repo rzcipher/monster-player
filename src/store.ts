@@ -4,12 +4,12 @@ import type { Track, Playlist, RepeatMode, DspState, Palette, ViewMode, LibraryF
 import { AudioEngine } from "./engine/AudioEngine";
 import { buildDemoLibrary } from "./lib/demo";
 import { DEFAULT_PALETTE, extractPalette, applyPalette, staticPalette, type ThemeMode } from "./lib/colors";
-import { native, nativeFile } from "./lib/native";
+import { native, nativeBytes } from "./lib/native";
 import { releaseCover, releaseAllCovers } from "./lib/covers";
 import { seededShuffle, uid, dupKey, camelotCompatible, matchesSmart, qualityScore } from "./lib/util";
 import { analyzeLoudness, detectKey, detectBpm, waveformPeaks } from "./lib/analysis";
 import { fetchLrclib, plainToLines } from "./lib/lyrics";
-import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseFile } from "./lib/metadata";
+import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseBytes } from "./lib/metadata";
 
 export const DEFAULT_DSP: DspState = {
   enabled: true, eqOn: false, eq: new Array(18).fill(0), eqPreamp: 0, echo: 0, reverb: 0, flanger: 0, chorus: 0, bass: 0.15, stereoWidth: 0.5,
@@ -351,7 +351,9 @@ export const useStore = create<State>()(
           const f = files[i];
           if (existing.has(f.path)) continue;
           try {
-            const t = await parseFile(await nativeFile(f), f.path);
+            // raw bytes in, Track out — the buffer is garbage as soon as we return,
+            // so nothing lands in Chromium's blob store (and nothing spills to disk)
+            const t = await parseBytes(await nativeBytes(f), f.path, f.name, f.size, f.mtime);
             t.folder = f.folder;
             t.source = "file";
             const u = get().userData[f.path];
@@ -378,8 +380,7 @@ export const useStore = create<State>()(
           const name = path.split(/[\\/]/).pop() || path;
           const st = await native.stat(path);
           try {
-            const t = await parseFile(await nativeFile({ path, name, folder: path.slice(0, path.length - name.length - 1), size: st?.size || 0, mtime: st?.mtime || Date.now() }), path);
-            out.push(t);
+            out.push(await parseBytes(await nativeBytes({ path }), path, name, st?.size || 0, st?.mtime || Date.now()));
           } catch { /* skip */ }
         }
         if (!out.length) return;

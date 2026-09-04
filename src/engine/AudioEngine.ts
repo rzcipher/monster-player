@@ -2,6 +2,22 @@ import type { Track, DspState, CurveType } from "../types";
 import { dbToGain, clamp } from "../lib/util";
 import { detectSilence } from "../lib/analysis";
 import { renderDemoTrack } from "../lib/demo";
+import { native } from "../lib/native";
+
+/**
+ * Get a track's compressed bytes for decoding.
+ *
+ * In the packaged app we read straight from disk each time — the ArrayBuffer is
+ * detached by decodeAudioData, so nothing lingers. Tracks no longer carry a
+ * File/Blob reference precisely to keep them out of Chromium's blob store.
+ */
+async function readTrackBytes(track: Track): Promise<ArrayBuffer> {
+  if (native && track.path && track.source === "file") return native.readFile(track.path);
+  let file = track.file;
+  if (!file && track.handle) file = await track.handle.getFile();
+  if (!file) throw new Error("File not available — reconnect the library folder");
+  return file.arrayBuffer();
+}
 
 export const EQ_BANDS = [31, 63, 87, 125, 175, 250, 350, 500, 700, 1000, 1400, 2000, 2800, 4000, 5600, 8000, 11200, 16000];
 
@@ -278,10 +294,7 @@ export class AudioEngine {
     let buf: AudioBuffer;
     if (track.source === "demo") buf = await renderDemoTrack(track, this.ctx.sampleRate);
     else {
-      let file = track.file;
-      if (!file && track.handle) file = await track.handle.getFile();
-      if (!file) throw new Error("File not available — reconnect the library folder");
-      const ab = await file.arrayBuffer();
+      const ab = await readTrackBytes(track);
       try { buf = await this.ctx.decodeAudioData(ab); }
       catch { throw new Error(`Decoder rejected ${track.codec} (${track.path}). ALAC/DSD/APE need the native build's FFmpeg decoder.`); }
     }
@@ -320,10 +333,7 @@ export class AudioEngine {
     const cached = this.bufferCache.get(track.path || track.id);
     if (cached) return cached;
     if (track.source === "demo") return renderDemoTrack(track, this.ctx.sampleRate);
-    let file = track.file;
-    if (!file && track.handle) file = await track.handle.getFile();
-    if (!file) throw new Error("File not available — reconnect the library folder");
-    const ab = await file.arrayBuffer();
+    const ab = await readTrackBytes(track);
     // decodeAudioData detaches the ArrayBuffer, so the compressed copy is freed for us
     return this.ctx.decodeAudioData(ab);
   }

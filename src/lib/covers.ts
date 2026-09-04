@@ -30,7 +30,10 @@ function hashBytes(bytes: Uint8Array): string {
   return `${bytes.length.toString(36)}-${(h >>> 0).toString(36)}`;
 }
 
-async function makeThumb(blob: Blob): Promise<Blob> {
+async function makeThumb(bytes: Uint8Array, mime: string): Promise<Blob> {
+  // Build the source Blob only for the decode, and only for covers we haven't
+  // seen before — it is never retained, so nothing accumulates in blob storage.
+  const blob = new Blob([bytes as BlobPart], { type: mime || "image/jpeg" });
   // createImageBitmap can downscale during decode, so the full-size bitmap
   // never has to exist in memory.
   try {
@@ -62,8 +65,7 @@ export async function registerCover(bytes: Uint8Array, mime: string): Promise<st
   if (hit) { hit.refs++; return hit.url; }
 
   // placeholder first so concurrent callers for the same album don't race
-  const original = new Blob([bytes as BlobPart], { type: mime || "image/jpeg" });
-  const thumb = await makeThumb(original);
+  const thumb = await makeThumb(bytes, mime);
   const existing = byHash.get(key);
   if (existing) { existing.refs++; return existing.url; }
 

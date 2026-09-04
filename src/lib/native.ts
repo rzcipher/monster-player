@@ -45,6 +45,8 @@ export interface NativeApi {
   onMedia(cb: (key: MediaKey) => void): () => void;
   onOpenFiles(cb: (files: string[]) => void): () => void;
   onTrimMemory(cb: () => void): () => void;
+  reclaimedBytes(): Promise<number>;
+  diskUsage(): Promise<{ path: string; bytes: number }>;
 }
 
 declare global {
@@ -56,10 +58,17 @@ export const native: NativeApi | null =
 
 export const isNative = !!native;
 
-/** Read a file from disk into a `File` so the existing music-metadata path just works. */
-export async function nativeFile(f: NativeFile): Promise<File> {
-  const buf = await native!.readFile(f.path);
-  return new File([buf], f.name, { lastModified: f.mtime });
+/**
+ * Read a file from disk as raw bytes.
+ *
+ * IMPORTANT: do **not** wrap this in `new File(...)` / `new Blob(...)` and keep
+ * the result on a Track. Every Blob is registered with Chromium's blob store,
+ * which spills to disk under %APPDATA%/SaltBee/blob_storage once it exceeds its
+ * in-memory quota — that's how a 1000-track import wrote ~11 GB of chunk files.
+ * Parse the bytes, then let them go.
+ */
+export async function nativeBytes(f: Pick<NativeFile, "path">): Promise<Uint8Array> {
+  return new Uint8Array(await native!.readFile(f.path));
 }
 
 /** Open a URL — external browser under Electron, new tab in the web build. */

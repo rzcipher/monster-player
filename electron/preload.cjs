@@ -58,4 +58,6 @@ contextBridge.exposeInMainWorld("saltbee", {
   },
   onOpenFiles: on("open:files"),
   onTrimMemory: on("app:trimMemory"),
+  reclaimedBytes: () => ipcRenderer.invoke("app:reclaimed"),
+  diskUsage: () => ipcRenderer.invoke("app:diskUsage"),
 });
