@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, Play } from "lucide-react";
 import { useStore } from "../store";
+import { useShallow } from "zustand/react/shallow";
 import { useVisibleTracks } from "../lib/selectors";
 import { Toolbar, useTrackMenu } from "./TrackTable";
 import { Cover, Stars, QualityBadge, ContextMenu, CamelotChip, type MenuItem } from "./ui";
@@ -8,7 +9,13 @@ import { fmtTime } from "../lib/util";
 import type { Track } from "../types";
 
 export default function CoverGrid() {
-  const s = useStore();
+  const s = useStore(
+    useShallow((st) => ({
+      currentId: st.currentId, tracks: st.tracks, filter: st.filter, setFilter: st.setFilter,
+      playTrack: st.playTrack, enqueue: st.enqueue, setView: st.setView, search: st.search,
+      artistView: st.artistView, groupBy: st.groupBy,
+    })),
+  );
   const list = useVisibleTracks();
   const menu = useTrackMenu();
   const [open, setOpen] = useState<string | null>(null);

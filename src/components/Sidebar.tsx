@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronRight, User, Disc, ListMusic, Sparkles, ShieldAlert, Plus, Folder, Bookmark, History, Settings, Sliders, BarChart3, Users } from "lucide-react";
 import { useStore } from "../store";
+import { useShallow } from "zustand/react/shallow";
 import type { LibraryFilter } from "../types";
 
 const ALPHA = ["*", "1", "9", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""), "あ", "か", "さ", "た", "な", "は", "ま", "や", "ら", "わ", "漢"];
@@ -22,7 +23,13 @@ function firstChar(s: string) {
 }
 
 export default function Sidebar() {
-  const { tracks, playlists, filter, setFilter, createPlaylist, deletePlaylist, renamePlaylist, set, ask, view, setView, libraryName } = useStore();
+  const { tracks, playlists, filter, setFilter, createPlaylist, deletePlaylist, renamePlaylist, set, ask, view, setView, libraryName } = useStore(
+    useShallow((st) => ({
+      tracks: st.tracks, playlists: st.playlists, filter: st.filter, setFilter: st.setFilter,
+      createPlaylist: st.createPlaylist, deletePlaylist: st.deletePlaylist, renamePlaylist: st.renamePlaylist,
+      set: st.set, ask: st.ask, view: st.view, setView: st.setView, libraryName: st.libraryName,
+    })),
+  );
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [letter, setLetter] = useState("*");
   const [mode, setMode] = useState<"artist" | "folder">("artist");

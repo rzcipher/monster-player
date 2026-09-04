@@ -76,7 +76,9 @@ export async function registerCover(bytes: Uint8Array, mime: string): Promise<st
 
 /** Drop a reference; the blob is revoked once nothing points at it. */
 export function releaseCover(url: string | null) {
-  if (!url) return;
+  // saltbee-art:// URLs are served from disk by the main process — there is no
+  // blob to revoke, and Chromium manages that cache itself.
+  if (!url || !url.startsWith("blob:")) return;
   for (const [key, e] of byHash) {
     if (e.url !== url) continue;
     if (--e.refs <= 0) { URL.revokeObjectURL(e.url); byHash.delete(key); }
@@ -92,4 +94,34 @@ export function coverStats() {
 export function releaseAllCovers() {
   for (const e of byHash.values()) URL.revokeObjectURL(e.url);
   byHash.clear();
+}
+
+/**
+ * Register a cover delivered from the main process as base64.
+ *
+ * Synchronous dedupe on the base64 string itself, so an album's 12 tracks
+ * decode the image exactly once. Only new artwork pays the decode cost.
+ */
+const b64Seen = new Map<string, string>();
+
+export function registerCoverB64(b64: string, mime: string): string {
+  const key = `${b64.length}:${b64.slice(0, 64)}:${b64.slice(-32)}`;
+  const hit = b64Seen.get(key);
+  if (hit) return hit;
+
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mime || "image/jpeg" }));
+  b64Seen.set(key, url);
+
+  // downscale in the background and swap the URL in place once ready
+  void (async () => {
+    try {
+      const thumbUrl = await registerCover(bytes, mime);
+      if (thumbUrl !== url) b64Seen.set(key, thumbUrl);
+    } catch { /* keep the original */ }
+  })();
+
+  return url;
 }

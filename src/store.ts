@@ -4,12 +4,12 @@ import type { Track, Playlist, RepeatMode, DspState, Palette, ViewMode, LibraryF
 import { AudioEngine } from "./engine/AudioEngine";
 import { buildDemoLibrary } from "./lib/demo";
 import { DEFAULT_PALETTE, extractPalette, applyPalette, staticPalette, type ThemeMode } from "./lib/colors";
-import { native, nativeBytes } from "./lib/native";
+import { native, nativeBytes, artUrl, type LibRecord } from "./lib/native";
 import { releaseCover, releaseAllCovers } from "./lib/covers";
 import { seededShuffle, uid, dupKey, camelotCompatible, matchesSmart, qualityScore } from "./lib/util";
 import { analyzeLoudness, detectKey, detectBpm, waveformPeaks } from "./lib/analysis";
-import { fetchLrclib, plainToLines } from "./lib/lyrics";
-import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseBytes } from "./lib/metadata";
+import { fetchLrclib, plainToLines, parseLrc } from "./lib/lyrics";
+import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseBytes, blankTrack } from "./lib/metadata";
 
 export const DEFAULT_DSP: DspState = {
   enabled: true, eqOn: false, eq: new Array(18).fill(0), eqPreamp: 0, echo: 0, reverb: 0, flanger: 0, chorus: 0, bass: 0.15, stereoWidth: 0.5,
@@ -119,6 +119,7 @@ interface State {
   setStatus: (s: string) => void;
   importFolder: () => Promise<void>;
   importNativeFolder: (root: string) => Promise<void>;
+  syncLibrary: (roots: string[], opts?: { force?: boolean; showProgress?: boolean }) => Promise<void>;
   importNativePaths: (paths: string[], diskMode?: boolean) => Promise<void>;
   importFiles: (files: FileList | File[], diskMode?: boolean) => Promise<void>;
   reconnectLibrary: () => Promise<void>;
@@ -233,6 +234,57 @@ function afterTrackChange(t: Track) {
 
 function udKey(t: Track) { return t.source === "demo" ? t.id : t.path + (t.cueStart ? "#" + t.cueStart : ""); }
 
+/**
+ * Convert a main-process library record into a renderer Track.
+ * Pure and cheap — no I/O, and cover registration is deduped by content.
+ */
+function recordToTrack(r: LibRecord, userData: State["userData"]): Track {
+  const t = blankTrack();
+  t.id = "f:" + r.path;
+  t.path = r.path;
+  t.folder = r.folder;
+  t.source = "file";
+  t.title = r.title || r.name;
+  t.artist = r.artist || "Unknown artist";
+  t.albumArtist = r.albumArtist || r.artist || "Unknown artist";
+  t.album = r.album || "Unknown album";
+  t.genre = r.genre;
+  t.composer = r.composer;
+  t.lyricist = r.lyricist;
+  t.year = r.year;
+  t.trackNo = r.trackNo;
+  t.discNo = r.discNo;
+  t.duration = r.duration;
+  t.bitrate = r.bitrate;
+  t.sampleRate = r.sampleRate;
+  t.bitDepth = r.bitDepth;
+  t.channels = r.channels;
+  t.codec = r.codec;
+  t.lossless = r.lossless;
+  t.fileSize = r.size;
+  t.added = r.mtime || Date.now();
+  t.isrc = r.isrc || "";
+  t.mbid = r.mbid || "";
+  t.bpm = r.bpm;
+  t.key = r.key || "";
+  t.rgTrackGain = r.rgTrackGain;
+  t.rgTrackPeak = r.rgTrackPeak;
+  t.coverUrl = artUrl(r.coverId);
+  if (r.lyrics) {
+    if (r.lyrics.synced) {
+      const mul = r.lyrics.ms ? 0.001 : 0.026;
+      t.lyrics = r.lyrics.lines.map((l) => ({ time: l.t * mul, text: l.x }));
+      t.lyricsSource = "embedded";
+    } else {
+      t.lyrics = parseLrc(r.lyrics.text) || plainToLines(r.lyrics.text, r.duration);
+      t.lyricsSource = t.lyrics ? "embedded" : "none";
+    }
+  }
+  t.qualityScore = qualityScore(t);
+  const u = userData[udKey(t)];
+  return u ? { ...t, ...u } : t;
+}
+
 export const useStore = create<State>()(
   persist(
     (set, get) => ({
@@ -258,11 +310,10 @@ export const useStore = create<State>()(
         const hasRealLibrary = (s.libraryRoots?.length ?? 0) > 0;
         let tracks: Track[] = hasRealLibrary ? [] : buildDemoLibrary();
         // reconnect persisted folder if possible
-        // native shell: rescan the remembered roots instead of the browser handle
+        // Native shell: paint from the on-disk index immediately, then let the
+        // background rescan reconcile. No full re-parse on every launch.
         if (native && hasRealLibrary) {
-          for (const root of s.libraryRoots) {
-            try { await get().importNativeFolder(root); } catch { /* folder moved/offline */ }
-          }
+          void get().syncLibrary(s.libraryRoots, { showProgress: false });
           tracks = get().tracks;
         }
         const h = native ? null : await loadDirHandle();
@@ -342,35 +393,69 @@ export const useStore = create<State>()(
 
       importNativeFolder: async (root) => {
         if (!native) return;
-        set({ scan: { active: true, done: 0, total: 0, current: root }, status: `Scanning ${root}…` });
-        const files = await native.scan(root);
-        set({ scan: { active: true, done: 0, total: files.length, current: "" } });
-        const existing = new Set(get().tracks.map((t) => t.path));
-        const fresh: Track[] = [];
-        for (let i = 0; i < files.length; i++) {
-          const f = files[i];
-          if (existing.has(f.path)) continue;
-          try {
-            // raw bytes in, Track out — the buffer is garbage as soon as we return,
-            // so nothing lands in Chromium's blob store (and nothing spills to disk)
-            const t = await parseBytes(await nativeBytes(f), f.path, f.name, f.size, f.mtime);
-            t.folder = f.folder;
-            t.source = "file";
-            const u = get().userData[f.path];
-            fresh.push(u ? { ...t, ...u } : t);
-          } catch { /* unreadable file */ }
-          if (i % 8 === 0) set({ scan: { active: true, done: i + 1, total: files.length, current: f.name } });
+        const roots = [...new Set([...get().libraryRoots, root])];
+        set({ libraryRoots: roots, libraryName: root.split(/[\\/]/).pop() || root });
+        await get().syncLibrary(roots, { showProgress: true });
+      },
+
+      /**
+       * Cache-first library load.
+       *
+       * The main process owns the index, so startup is: paint whatever the
+       * index already knows (instant), then rescan in the background and
+       * merge only what actually changed. Tracks stream in as batches.
+       */
+      syncLibrary: async (roots, opts = {}) => {
+        if (!native || !roots.length) return;
+        const toTrack = (r: LibRecord): Track => recordToTrack(r, get().userData);
+
+        // 1. instant paint from the on-disk index
+        if (opts.showProgress !== false) set({ status: "Loading library…" });
+        const cached = await native.libCached(roots);
+        if (cached.length) {
+          const byPath = new Map(get().tracks.map((t) => [t.path, t]));
+          for (const r of cached) if (!byPath.has(r.path)) byPath.set(r.path, toTrack(r));
+          set({ tracks: [...byPath.values()], status: `${cached.length} tracks` });
+          get().recomputeDupes();
+          if (!get().queue.length) set({ queue: get().tracks.filter((t) => !t.quarantined).map((t) => t.id) });
         }
-        set({
-          tracks: [...get().tracks, ...fresh],
-          libraryName: root.split(/[\\/]/).pop() || root,
-          libraryRoots: [...new Set([...get().libraryRoots, root])],
-          scan: { active: false, done: 0, total: 0, current: "" },
-          status: `Imported ${fresh.length} tracks from ${root}`,
+
+        // 2. background refresh — batches arrive on lib:batch
+        set({ scan: { active: true, done: 0, total: cached.length, current: "" } });
+        const pending: Track[] = [];
+        let flushTimer: number | null = null;
+        const flush = () => {
+          flushTimer = null;
+          if (!pending.length) return;
+          const add = pending.splice(0, pending.length);
+          const byPath = new Map(get().tracks.map((t) => [t.path, t]));
+          for (const t of add) byPath.set(t.path, { ...(byPath.get(t.path) || {}), ...t } as Track);
+          set({ tracks: [...byPath.values()] });
+        };
+
+        const offBatch = native.onLibBatch((batch) => {
+          for (const r of batch) pending.push(toTrack(r));
+          // coalesce: one store write per frame instead of one per batch
+          if (flushTimer === null) flushTimer = window.setTimeout(flush, 120);
         });
-        get().recomputeDupes();
-        if (!get().queue.length) set({ queue: get().tracks.filter((t) => !t.quarantined).map((t) => t.id) });
-        if (get().settings.autoAnalyze) get().analyzeAll();
+        const offProg = native.onLibProgress((p) => {
+          set({ scan: { active: p.phase !== "done", done: p.done, total: p.total, current: p.phase === "walked" ? `${p.total} files found` : "" } });
+        });
+
+        try {
+          const res = await native.libScan(roots, { force: !!opts.force });
+          flush();
+          set({ status: res.parsed ? `${res.total} tracks · ${res.parsed} updated` : `${res.total} tracks · up to date` });
+        } catch {
+          set({ status: "Library scan failed" });
+        } finally {
+          if (flushTimer !== null) { clearTimeout(flushTimer); flush(); }
+          offBatch(); offProg();
+          set({ scan: { active: false, done: 0, total: 0, current: "" } });
+          get().recomputeDupes();
+          if (!get().queue.length) set({ queue: get().tracks.filter((t) => !t.quarantined).map((t) => t.id) });
+          if (get().settings.autoAnalyze) get().analyzeAll();
+        }
       },
 
       importNativePaths: async (paths, diskMode = false) => {
@@ -390,7 +475,12 @@ export const useStore = create<State>()(
       },
 
       reconnectLibrary: async () => {
-        if (native) { for (const root of get().libraryRoots) await get().importNativeFolder(root); if (!get().libraryRoots.length) get().importFolder(); return; }
+        if (native) {
+          const roots = get().libraryRoots;
+          if (!roots.length) { get().importFolder(); return; }
+          await get().syncLibrary(roots, { force: true });
+          return;
+        }
         const h = await loadDirHandle();
         if (!h) { get().importFolder(); return; }
         const perm = await (h as FileSystemDirectoryHandle & { requestPermission: (o: { mode: string }) => Promise<string> }).requestPermission({ mode: "read" });
@@ -404,7 +494,7 @@ export const useStore = create<State>()(
         if (get().settings.autoAnalyze) get().analyzeAll();
       },
 
-      clearLibrary: () => { releaseAllCovers(); getEngine().releaseCache(); set({ tracks: buildDemoLibrary(), queue: [], currentId: null, playing: false }); getEngine().stop(); get().recomputeDupes(); },
+      clearLibrary: () => { releaseAllCovers(); getEngine().releaseCache(); native?.libClearIndex(); set({ libraryRoots: [] }); set({ tracks: buildDemoLibrary(), queue: [], currentId: null, playing: false }); getEngine().stop(); get().recomputeDupes(); },
 
       playTrack: async (id, contextIds) => {
         const s = get();

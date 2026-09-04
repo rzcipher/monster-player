@@ -1,6 +1,7 @@
 import { Fragment, useState, useCallback, useMemo, type ReactNode } from "react";
 import { ChevronUp, ChevronDown, ChevronRight, Play, ListPlus, ListEnd, Tag, FileText, Activity, Wand2, Languages, Mic2, ExternalLink, ArrowUpCircle, Trash2, ShieldCheck, LayoutGrid, Table2, Columns3, Sparkles, Users, Group, FolderOpen, ArrowDownWideNarrow } from "lucide-react";
 import { useStore } from "../store";
+import { useShallow } from "zustand/react/shallow";
 import { useVisibleTracks, bestSibling } from "../lib/selectors";
 import { fmtTime, fmtLong, fmtSize, toCamelot } from "../lib/util";
 import type { ColumnKey, Track } from "../types";
@@ -98,7 +99,34 @@ export function Toolbar({ list }: { list: Track[] }) {
 }
 
 export default function TrackTable() {
-  const s = useStore();
+  // Narrow subscriptions: the table must not re-render on playback position,
+  // status text, scan progress, palette changes, etc. `useShallow` keeps the
+  // selected slice stable so React can bail out of the re-render entirely.
+  const s = useStore(
+    useShallow((st) => ({
+      currentId: st.currentId,
+      playing: st.playing,
+      selected: st.selected,
+      visibleCols: st.visibleCols,
+      sortCol: st.sortCol,
+      sortDir: st.sortDir,
+      groupBy: st.groupBy,
+      sortPreset: st.sortPreset,
+      filter: st.filter,
+      tracks: st.tracks,
+      setSelected: st.setSelected,
+      playTrack: st.playTrack,
+      enqueue: st.enqueue,
+      setSort: st.setSort,
+      setRating: st.setRating,
+      setTrim: st.setTrim,
+      mergeGroup: st.mergeGroup,
+      restore: st.restore,
+      toggleCol: st.toggleCol,
+      upgradeTo: st.upgradeTo,
+      search: st.search,
+    })),
+  );
   const list = useVisibleTracks();
   const menu = useTrackMenu();
   const [ctx, setCtx] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);

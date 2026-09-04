@@ -6,6 +6,33 @@
  * Access API. In the packaged .exe we get real folder scanning, global media
  * keys, tray control and the auto-hiding dock.
  */
+/** A parsed track record as produced by the main-process indexer. */
+export interface LibRecord {
+  path: string; folder: string; name: string;
+  size: number; mtime: number;
+  title: string; artist: string; albumArtist: string; album: string;
+  genre: string; composer: string; lyricist: string;
+  year: number | null; trackNo: number | null; trackOf: number | null;
+  discNo: number | null; discOf: number | null;
+  duration: number; bitrate: number; sampleRate: number; bitDepth: number | null; channels: number;
+  codec: string; lossless: boolean;
+  isrc: string | null; mbid: string | null; bpm: number | null; key: string | null;
+  rgTrackGain: number | null; rgTrackPeak: number | null;
+  coverId: string | null;
+  lyrics: { synced: true; ms: boolean; lines: { t: number; x: string }[] } | { synced: false; text: string } | null;
+  parseError?: boolean;
+}
+
+/** Resolve an indexed cover id to a URL Chromium can cache and evict itself. */
+export function artUrl(coverId: string | null): string | null {
+  return coverId ? `saltbee-art://art/${encodeURIComponent(coverId)}` : null;
+}
+
+export interface LibProgress {
+  phase: "walked" | "parsing" | "done";
+  total: number; done: number; reused?: number; parsed?: number;
+}
+
 export interface NativeFile { path: string; name: string; folder: string; size: number; mtime: number }
 export interface DockState { on: boolean; expanded: boolean; autoHide: boolean; revealed: boolean }
 export type MediaKey = "playpause" | "next" | "prev" | "stop" | "lyrics";
@@ -27,7 +54,13 @@ export interface NativeApi {
   onDockRevealed(cb: (revealed: boolean) => void): () => void;
   pickFolder(): Promise<string | null>;
   pickFiles(): Promise<string[]>;
-  scan(root: string): Promise<NativeFile[]>;
+  /** Instant: records already in the on-disk index. */
+  libCached(roots: string[]): Promise<LibRecord[]>;
+  /** Walk + parse in the main process; results stream via onLibBatch. */
+  libScan(roots: string[], opts?: { force?: boolean }): Promise<{ total: number; reused: number; parsed: number }>;
+  libClearIndex(): Promise<boolean>;
+  onLibBatch(cb: (batch: LibRecord[]) => void): () => void;
+  onLibProgress(cb: (p: LibProgress) => void): () => void;
   onScanProgress(cb: (p: { done: number; current: string }) => void): () => void;
   readFile(path: string): Promise<ArrayBuffer>;
   readText(path: string): Promise<string | null>;

@@ -7,12 +7,14 @@
 //  * native folder scanning (no browser File System Access API needed)
 //  * global media hotkeys, tray icon, single-instance, window-state memory
 //  * local CLI bridge for the tagging/Demucs helpers
-const { app, BrowserWindow, ipcMain, screen, shell, dialog, globalShortcut, Tray, Menu, nativeImage, powerSaveBlocker } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, shell, dialog, globalShortcut, Tray, Menu, nativeImage, powerSaveBlocker, protocol, net } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const http = require("http");
 const { spawn } = require("child_process");
+const { pathToFileURL } = require("url");
+const library = require("./library.cjs");
 
 const DOCK_HEIGHT = 58;
 const DOCK_EXPANDED_HEIGHT = 720;
@@ -20,6 +22,10 @@ const PEEK = 3;              // pixels of window left on screen when auto-hidden
 const HOVER_ZONE = 4;        // how close to the top edge the cursor must get
 const REVEAL_MS = 90;        // animation step interval
 const HIDE_DELAY = 700;      // grace period before hiding again
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: "saltbee-art", privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+]);
 
 const isWin = process.platform === "win32";
 const stateFile = () => path.join(app.getPath("userData"), "window-state.json");
@@ -46,13 +52,21 @@ app.commandLine.appendSwitch("disable-features", [
   "Translate",
   "OptimizationHints",
   "CalculateNativeWinOcclusion",
+  "site-per-process",             // single local origin — isolation costs a process each
+  "IsolateOrigins",
+  "BackForwardCache",             // no navigation in this app
 ].join(","));
 app.commandLine.appendSwitch("enable-features", "WebAudioSinkSelection");
 // A music player has no business holding a 4 GB heap. Cap it so V8 collects
 // decoded PCM aggressively instead of letting it pile up.
-app.commandLine.appendSwitch("js-flags", "--max-old-space-size=512 --expose-gc");
+app.commandLine.appendSwitch("js-flags", "--max-old-space-size=384 --expose-gc");
 app.commandLine.appendSwitch("renderer-process-limit", "1");
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
+// We are a single-origin local app: site isolation buys us nothing and costs a
+// process (plus its own heap) per site. This is what trims the helper count.
+app.commandLine.appendSwitch("disable-site-isolation-trials");
+app.commandLine.appendSwitch("process-per-site");
+
 
 // ------------------------------------------------------- blob-storage cleanup
 /**
@@ -283,7 +297,7 @@ ipcMain.on("win:opacity", (_e, v) => win?.setOpacity(Math.max(0.25, Math.min(1, 
 ipcMain.handle("win:isMaximized", () => !!win?.isMaximized());
 
 // --------------------------------------------------------- native filesystem
-const AUDIO_EXT = new Set([".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aif", ".aiff", ".aifc", ".wma", ".ape", ".wv", ".mpc", ".tta", ".dsf", ".dff", ".cue"]);
+const AUDIO_EXT = library.AUDIO_EXT;
 
 ipcMain.handle("fs:pickFolder", async () => {
   const r = await dialog.showOpenDialog(win, { properties: ["openDirectory"], title: "Choose your music folder" });
@@ -298,27 +312,31 @@ ipcMain.handle("fs:pickFiles", async () => {
 });
 
 /** Recursively list audio files under `root` (native, fast, no permission prompts). */
-ipcMain.handle("fs:scan", async (e, root) => {
-  const out = [];
-  let seen = 0;
-  async function walk(dir, depth) {
-    if (depth > 12) return;
-    let entries = [];
-    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) { if (ent.name.startsWith(".")) continue; await walk(full, depth + 1); }
-      else if (AUDIO_EXT.has(path.extname(ent.name).toLowerCase())) {
-        let size = 0, mtime = Date.now();
-        try { const st = await fsp.stat(full); size = st.size; mtime = st.mtimeMs; } catch { /* ignore */ }
-        out.push({ path: full, name: ent.name, folder: dir, size, mtime });
-        if (++seen % 40 === 0) e.sender.send("fs:scanProgress", { done: seen, current: full });
-      }
-    }
+/**
+ * Indexed library API.
+ *
+ * lib:cached  — instant: whatever the on-disk index already knows
+ * lib:scan    — walk + parse in the main process, streaming batches back;
+ *               unchanged files (same size+mtime) are reused from the index
+ */
+ipcMain.handle("lib:cached", (_e, roots) => library.cachedFor(roots || []));
+
+ipcMain.handle("lib:scan", async (e, roots, opts) => {
+  const send = (batch, progress) => {
+    if (e.sender.isDestroyed()) return;
+    if (batch && batch.length) e.sender.send("lib:batch", batch);
+    if (progress) e.sender.send("lib:progress", progress);
+  };
+  try {
+    return await library.scanRoots(roots || [], send, opts || {});
+  } catch (err) {
+    console.warn("[SaltBee] scan failed", err);
+    return { total: 0, reused: 0, parsed: 0, error: String(err && err.message) };
   }
-  await walk(root, 0);
-  return out;
 });
+
+ipcMain.handle("lib:clearIndex", () => { library.clearIndex(); return true; });
+
 
 ipcMain.handle("fs:read", async (_e, file) => {
   const buf = await fsp.readFile(file);
@@ -467,6 +485,15 @@ else {
     if (isWin) app.setAppUserModelId("com.saltbee.player");
     // must run before any renderer starts using blob storage
     reclaimedBytes = reclaimBlobStorage();
+    // Serve cover art straight off disk. Chromium caches and evicts these
+    // itself, so artwork never sits permanently in the JS heap.
+    protocol.handle("saltbee-art", (req) => {
+      const id = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ""));
+      if (!id || id.includes("..") || id.includes("/") || id.includes("\\")) return new Response(null, { status: 400 });
+      return net.fetch(pathToFileURL(path.join(library.artDir(), id)).toString());
+    });
+    const n = library.loadIndex();
+    if (n) console.log(`[SaltBee] library index loaded: ${n} tracks`);
     createWindow();
     startCliBridge();
     buildTray();
@@ -476,6 +503,7 @@ else {
     app.on("activate", () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
   });
 
-  app.on("will-quit", () => { globalShortcut.unregisterAll(); stopHoverWatch(); });
+  app.on("will-quit", () => {
+  library.saveIndexNow(); globalShortcut.unregisterAll(); stopHoverWatch(); });
   app.on("window-all-closed", () => app.quit());
 }

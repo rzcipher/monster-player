@@ -29,7 +29,12 @@ contextBridge.exposeInMainWorld("saltbee", {
   // filesystem
   pickFolder: () => ipcRenderer.invoke("fs:pickFolder"),
   pickFiles: () => ipcRenderer.invoke("fs:pickFiles"),
-  scan: (root) => ipcRenderer.invoke("fs:scan", root),
+  // indexed library (main-process scanning; only small records cross IPC)
+  libCached: (roots) => ipcRenderer.invoke("lib:cached", roots),
+  libScan: (roots, opts) => ipcRenderer.invoke("lib:scan", roots, opts),
+  libClearIndex: () => ipcRenderer.invoke("lib:clearIndex"),
+  onLibBatch: on("lib:batch"),
+  onLibProgress: on("lib:progress"),
   onScanProgress: on("fs:scanProgress"),
   readFile: (p) => ipcRenderer.invoke("fs:read", p),
   readText: (p) => ipcRenderer.invoke("fs:readText", p),

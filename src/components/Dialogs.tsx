@@ -227,10 +227,19 @@ export function SettingsDialog() {
               {s.libraryRoots.map((r) => (
                 <div key={r} className="flex items-center gap-2 text-[11px]">
                   <code className="flex-1 truncate">{r}</code>
-                  <button className="underline hover:text-white" onClick={() => s.importNativeFolder(r)}>rescan</button>
+                  <button className="underline hover:text-white" onClick={() => s.syncLibrary([r])}>rescan</button>
                   <button className="underline hover:text-white" onClick={() => native?.reveal(r)}>open</button>
                 </div>
               ))}
+            </div>
+          )}
+          {native && s.libraryRoots.length > 0 && (
+            <div className="mt-2 text-[11px] text-muted">
+              Folders are indexed once; relaunching reads the index instead of re-reading every file.
+              Changed or new files are picked up automatically in the background.{" "}
+              <button className="underline hover:text-white" onClick={() => s.syncLibrary(s.libraryRoots, { force: true })}>
+                force full re-read
+              </button>
             </div>
           )}
           <div className="mt-2 text-muted text-[11px]">Library: <b className="text-fg">{s.libraryName}</b> · {s.tracks.length} tracks · <button className="underline" onClick={s.reconnectLibrary}>reconnect folder</button></div>
