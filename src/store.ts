@@ -11,11 +11,30 @@ import { analyzeLoudness, detectKey, detectBpm, waveformPeaks, setWaveform } fro
 import { fetchLrclib, plainToLines, parseLrc } from "./lib/lyrics";
 import { scanDirectoryHandle, scanFileList, saveDirHandle, loadDirHandle, parseBytes, blankTrack } from "./lib/metadata";
 
+/**
+ * Factory DSP state — deliberately BIT-TRANSPARENT.
+ *
+ * The rule: out of the box SaltBee must not alter the samples in any audible
+ * way. Every processing stage is off, and nothing is applied until the user
+ * turns it on. This matches AIMP/foobar behaviour, where a fresh install is a
+ * straight wire from the decoder to the output device.
+ *
+ * Previously the defaults quietly coloured everything:
+ *   - bass: 0.15  -> a +2.1 dB low shelf at 110 Hz on every track
+ *   - limiter: true -> brickwall at -1 dBFS, 20:1, 1 ms attack, squashing peaks
+ *   - rgOn/rgOnTheFly -> per-track gain changes from loudness analysis
+ * That combination is why playback sounded bass-heavy, quieter and less
+ * dynamic than the same files in AIMP.
+ *
+ * Note `enabled: false` — the whole DSP chain is bypassed at the graph level,
+ * so the signal doesn't even traverse the 18 EQ biquads until DSP is switched
+ * on. Turning any effect on from the UI enables the chain automatically.
+ */
 export const DEFAULT_DSP: DspState = {
-  enabled: true, eqOn: false, eq: new Array(18).fill(0), eqPreamp: 0, echo: 0, reverb: 0, flanger: 0, chorus: 0, bass: 0.15, stereoWidth: 0.5,
-  speed: 1, pitch: 0, tempo: 1, balance: 0, voiceRemover: false, fadeOnPause: true, fadeOnSeek: true,
+  enabled: false, eqOn: false, eq: new Array(18).fill(0), eqPreamp: 0, echo: 0, reverb: 0, flanger: 0, chorus: 0, bass: 0, stereoWidth: 0.5,
+  speed: 1, pitch: 0, tempo: 1, balance: 0, voiceRemover: false, fadeOnPause: false, fadeOnSeek: false,
   smoothVolume: true, logVolume: false, loudnessComp: false, peakNorm: false, peakTarget: 0,
-  rgOn: true, rgDefault: 0, rgOnTheFly: true, rgOnTheFlyPreamp: 0, rgFromTags: true, rgTagPreamp: 0, rgSource: "file", limiter: true,
+  rgOn: false, rgDefault: 0, rgOnTheFly: false, rgOnTheFlyPreamp: 0, rgFromTags: true, rgTagPreamp: 0, rgSource: "file", limiter: false,
   crossfade: false, crossfadeSec: 4, crossfadeCurve: "equalPower", gapless: true, crossfadeOnManual: true,
   removeSilence: false, silenceMs: 500, silenceDb: -60, silenceEdges: true,
 };
@@ -637,7 +656,30 @@ export const useStore = create<State>()(
       setSortPreset: (sortPreset) => set({ sortPreset }),
       toggleCol: (c) => { const v = get().visibleCols; set({ visibleCols: v.includes(c) ? v.filter((x) => x !== c) : [...v, c] }); },
       setSelected: (selected) => set({ selected }),
-      setDsp: (p) => { const dsp = { ...get().dsp, ...p }; set({ dsp }); getEngine().applyDsp(dsp); get().syncNext(); },
+      /**
+       * Apply a DSP change.
+       *
+       * The chain is bypassed by default (`enabled: false`), so switching on an
+       * effect has to enable it too — otherwise the user drags an EQ slider,
+       * hears nothing, and concludes the feature is broken. We only do this for
+       * changes that actually request processing: toggling `enabled` itself, or
+       * purely transport-level keys (crossfade, gapless, fades), must not
+       * silently re-engage the chain.
+       */
+      setDsp: (p) => {
+        const dsp = { ...get().dsp, ...p };
+        const TRANSPORT_ONLY = new Set([
+          "enabled", "crossfade", "crossfadeSec", "crossfadeCurve", "gapless", "crossfadeOnManual",
+          "fadeOnPause", "fadeOnSeek", "smoothVolume", "logVolume", "rgSource",
+        ]);
+        if (!("enabled" in p) && !dsp.enabled) {
+          const wantsProcessing = Object.keys(p).some((k) => !TRANSPORT_ONLY.has(k));
+          if (wantsProcessing) dsp.enabled = true;
+        }
+        set({ dsp });
+        getEngine().applyDsp(dsp);
+        get().syncNext();
+      },
       setEqBand: (i, v) => { const eq = get().dsp.eq.slice(); eq[i] = v; get().setDsp({ eq }); },
       applyEqPreset: (name) => { const p = EQ_PRESETS[name]; if (p) get().setDsp({ eq: p.slice(), eqOn: true }); },
       resetDsp: () => get().setDsp({ ...DEFAULT_DSP }),
@@ -824,6 +866,15 @@ export const useStore = create<State>()(
     {
       name: "saltbee-v1",
       /**
+       * v2: neutral-by-default audio.
+       *
+       * Bumping this runs `migrate` once per install. Existing users have the
+       * old colouring (bass shelf, limiter, on-the-fly ReplayGain) written to
+       * disk, and the deep-merge below would faithfully preserve it — so the
+       * migration explicitly clears those three stages.
+       */
+      version: 2,
+      /**
        * Debounced writer.
        *
        * zustand/persist serialises the whole partialized state on *every*
@@ -875,6 +926,37 @@ export const useStore = create<State>()(
           ...p,
           settings: { ...current.settings, ...(p.settings || {}) },
           dsp: { ...DEFAULT_DSP, ...(p.dsp || {}) },
+        };
+      },
+      /**
+       * One-time reset of the stages that used to colour playback by default.
+       *
+       * Only the processing that was silently ON is cleared. Anything the user
+       * deliberately configured — EQ curve, crossfade, gapless, volume,
+       * balance, speed/pitch — is left exactly as they set it.
+       */
+      migrate: (persisted, from) => {
+        const s = (persisted || {}) as Partial<State>;
+        if (from >= 2) return s;
+        const dsp = { ...DEFAULT_DSP, ...(s.dsp || {}) };
+        return {
+          ...s,
+          dsp: {
+            ...dsp,
+            // the three culprits
+            bass: 0,
+            limiter: false,
+            rgOn: false,
+            rgOnTheFly: false,
+            // ...plus the transport fades, which also alter what you hear
+            fadeOnPause: false,
+            fadeOnSeek: false,
+            // bypass the chain entirely unless the user had a real effect dialled in
+            enabled: !!(dsp.eqOn || dsp.echo || dsp.reverb || dsp.flanger || dsp.chorus ||
+              dsp.voiceRemover || dsp.loudnessComp || dsp.peakNorm ||
+              dsp.speed !== 1 || dsp.pitch !== 0 || dsp.tempo !== 1 || dsp.balance !== 0 ||
+              dsp.stereoWidth !== 0.5),
+          },
         };
       },
     },

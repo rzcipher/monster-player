@@ -151,7 +151,25 @@ export function SettingsDialog() {
         <section>
           <div className="label mb-2">Playback engine</div>
           <div className="space-y-2">
+            {/*
+              The single most important control for "why doesn't this sound
+              like AIMP". With DSP off the signal bypasses the tone shelves,
+              the 18 EQ biquads, every effect send and the width matrix.
+            */}
+            <Toggle
+              checked={!s.dsp.enabled}
+              onChange={(v) => s.setDsp({ enabled: !v })}
+              label="Original Sound — bypass the entire DSP chain (default)"
+            />
+            <div className="text-[11px] text-muted -mt-1 pl-1 leading-relaxed">
+              When on, SaltBee sends the decoder's samples straight to the output stage: no EQ, no tone shelf, no effects,
+              no limiter, no ReplayGain. Only the volume fader applies. Switching any effect on in Sound Effects turns this off.
+            </div>
             <Toggle checked={st.matchSourceRate} onChange={(v) => s.setSetting("matchSourceRate", v)} label="Bit-perfect: re-clock output to the source sample rate (no resampling in the engine)" />
+            <div className="text-[11px] text-muted -mt-1 pl-1 leading-relaxed">
+              Off, everything is resampled to the device's rate (typically 48 kHz), so a 44.1 or 96 kHz file is converted.
+              On, the audio context is rebuilt at each track's own rate — the closest equivalent to AIMP's bit-perfect output.
+            </div>
             <Toggle checked={st.precisionEngine} onChange={(v) => s.setSetting("precisionEngine", v)} label="Precision engine: decode each track fully instead of streaming" />
             <div className="text-[11px] text-muted -mt-1 pl-1 leading-relaxed">
               Streaming (default) hands playback to the media pipeline and uses a few MB per track. Precision decodes the whole

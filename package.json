@@ -1,7 +1,7 @@
 {
   "name": "saltbee",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,8 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist": "npm run icons && npm run build && electron-builder",
     "icons": "node scripts/make-icons.cjs",
-    "smoke": "node scripts/smoke-render.cjs"
+    "smoke": "node scripts/smoke-render.cjs",
+    "test:audio": "node scripts/audio-neutral.test.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

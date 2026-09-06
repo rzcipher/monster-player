@@ -230,6 +230,20 @@ export class AudioEngine {
     if (!this.tickTimer) this.tickTimer = window.setInterval(() => this.tick(), 40);
   }
 
+  /**
+   * Route the source into the graph.
+   *
+   * When DSP is off we bypass every processing node — tone shelves, the 18 EQ
+   * biquads, the effect sends and the width matrix — and go straight to the
+   * output stage. The remaining path is preamp -> [limiter] -> balance ->
+   * volume -> analyser -> destination, and each of those is unity when
+   * untouched: the limiter is physically disconnected unless enabled, and
+   * StereoPannerNode at pan=0 passes stereo input through unchanged
+   * (out = in, per the spec's pan<=0 branch where cos(pi/2)=0, sin(pi/2)=1).
+   *
+   * So with factory settings the samples reaching the device are the decoder's
+   * own, scaled only by the volume fader.
+   */
   private wireInput() {
     try { this.input.disconnect(); this.vrOut.disconnect(); } catch { /* */ }
     if (!this.dspEnabled) { this.input.connect(this.preamp); return; }
