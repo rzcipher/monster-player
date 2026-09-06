@@ -1,0 +1,118 @@
+/**
+ * Bridge to the Electron main process.
+ *
+ * Everything here degrades gracefully: when SaltBee runs in a plain browser
+ * (`npm run dev`) `native` is null and the app falls back to the File System
+ * Access API. In the packaged .exe we get real folder scanning, global media
+ * keys, tray control and the auto-hiding dock.
+ */
+/** A parsed track record as produced by the main-process indexer. */
+export interface LibRecord {
+  path: string; folder: string; name: string;
+  size: number; mtime: number;
+  title: string; artist: string; albumArtist: string; album: string;
+  genre: string; composer: string; lyricist: string;
+  year: number | null; trackNo: number | null; trackOf: number | null;
+  discNo: number | null; discOf: number | null;
+  duration: number; bitrate: number; sampleRate: number; bitDepth: number | null; channels: number;
+  codec: string; lossless: boolean;
+  isrc: string | null; mbid: string | null; bpm: number | null; key: string | null;
+  rgTrackGain: number | null; rgTrackPeak: number | null;
+  coverId: string | null;
+  lyrics: { synced: true; ms: boolean; lines: { t: number; x: string }[] } | { synced: false; text: string } | null;
+  parseError?: boolean;
+}
+
+/**
+ * Resolve an indexed cover id to a URL Chromium can cache and evict itself.
+ *
+ * Always prefer "thumb" for lists/grids — a full-resolution cover decodes to
+ * tens of megabytes of RGBA, and we only ever show it a few hundred px wide.
+ */
+export function artUrl(coverId: string | null, size: "thumb" | "full" = "thumb"): string | null {
+  if (!coverId) return null;
+  const id = size === "full" ? `${coverId}.full` : coverId;
+  return `saltbee-art://art/${encodeURIComponent(id)}`;
+}
+
+export interface LibProgress {
+  phase: "walked" | "parsing" | "done";
+  total: number; done: number; reused?: number; parsed?: number;
+}
+
+export interface NativeFile { path: string; name: string; folder: string; size: number; mtime: number }
+export interface DockState { on: boolean; expanded: boolean; autoHide: boolean; revealed: boolean }
+export type MediaKey = "playpause" | "next" | "prev" | "stop" | "lyrics";
+
+export interface NativeApi {
+  isElectron: true;
+  platform: string;
+  minimize(): void;
+  maximize(): void;
+  close(): void;
+  isMaximized(): Promise<boolean>;
+  onWindowState(cb: (s: { maximized: boolean }) => void): () => void;
+  dock(on: boolean): void;
+  dockExpand(on: boolean): void;
+  dockAutoHide(on: boolean): void;
+  pin(on: boolean): void;
+  setOpacity(v: number): void;
+  onDockState(cb: (s: DockState) => void): () => void;
+  onDockRevealed(cb: (revealed: boolean) => void): () => void;
+  pickFolder(): Promise<string | null>;
+  pickFiles(): Promise<string[]>;
+  /** Instant: records already in the on-disk index. */
+  libCached(roots: string[]): Promise<LibRecord[]>;
+  /** Walk + parse in the main process; results stream via onLibBatch. */
+  libScan(roots: string[], opts?: { force?: boolean }): Promise<{ total: number; reused: number; parsed: number }>;
+  libClearIndex(): Promise<boolean>;
+  onLibBatch(cb: (batch: LibRecord[]) => void): () => void;
+  onLibProgress(cb: (p: LibProgress) => void): () => void;
+  onScanProgress(cb: (p: { done: number; current: string }) => void): () => void;
+  readFile(path: string): Promise<ArrayBuffer>;
+  readText(path: string): Promise<string | null>;
+  writeText(path: string, text: string): Promise<boolean>;
+  stat(path: string): Promise<{ size: number; mtime: number } | null>;
+  reveal(path: string): void;
+  openExternal(url: string): void;
+  toggleLyricsWindow(on: boolean): void;
+  pushLyrics(payload: {
+    line?: string; sub?: string; title?: string; artist?: string;
+    sweep?: number; progress?: number; accent?: string; accent2?: string; fontSize?: number;
+  }): void;
+  onLyricsClosed(cb: () => void): () => void;
+  cli(payload: { action: string; path: string; isrc?: string; mbid?: string }): Promise<{ code: number; out: string }>;
+  onMedia(cb: (key: MediaKey) => void): () => void;
+  onOpenFiles(cb: (files: string[]) => void): () => void;
+  onTrimMemory(cb: () => void): () => void;
+  reclaimedBytes(): Promise<number>;
+  diskUsage(): Promise<{ path: string; bytes: number }>;
+}
+
+declare global {
+  interface Window { saltbee?: NativeApi }
+}
+
+export const native: NativeApi | null =
+  typeof window !== "undefined" && window.saltbee?.isElectron ? window.saltbee : null;
+
+export const isNative = !!native;
+
+/**
+ * Read a file from disk as raw bytes.
+ *
+ * IMPORTANT: do **not** wrap this in `new File(...)` / `new Blob(...)` and keep
+ * the result on a Track. Every Blob is registered with Chromium's blob store,
+ * which spills to disk under %APPDATA%/SaltBee/blob_storage once it exceeds its
+ * in-memory quota — that's how a 1000-track import wrote ~11 GB of chunk files.
+ * Parse the bytes, then let them go.
+ */
+export async function nativeBytes(f: Pick<NativeFile, "path">): Promise<Uint8Array> {
+  return new Uint8Array(await native!.readFile(f.path));
+}
+
+/** Open a URL — external browser under Electron, new tab in the web build. */
+export function openUrl(url: string) {
+  if (native) native.openExternal(url);
+  else window.open(url, "_blank", "noopener");
+}

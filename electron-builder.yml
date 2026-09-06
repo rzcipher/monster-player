@@ -1,0 +1,56 @@
+appId: com.saltbee.player
+productName: SaltBee
+copyright: Copyright © 2026 SaltBee
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+  - "!**/*.map"
+  - "!src/**/*"
+  - "!release/**/*"
+extraMetadata:
+  main: electron/main.cjs
+asar: true
+compression: maximum
+
+fileAssociations:
+  - ext: [flac, mp3, m4a, aac, ogg, opus, wav, aiff, wv, ape, dsf, cue]
+    name: Audio file
+    role: Viewer
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: SaltBee-${version}-${arch}-${ext}.${ext}
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SaltBee
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: SaltBee-${version}-portable.exe
+
+mac:
+  target: [dmg, zip]
+  category: public.app-category.music
+  icon: build/icon.png
+
+linux:
+  target: [AppImage, deb]
+  category: Audio
+  icon: build/icon.png
